@@ -3,6 +3,7 @@ import { broadcast } from '../../ws/hub.js'
 import { prisma } from '../../db/index.js'
 import { sendTelegramMessage } from '../telegram/bot.js'
 import type { PriceAlertCondition, ImpulseAlertCondition } from '../../types.js'
+import { formatPriceByPrecision } from '../../utils/format.js'
 
 let checkInterval: ReturnType<typeof setInterval> | null = null
 
@@ -28,7 +29,7 @@ export function startAlertEngine() {
             : ticker.price <= priceCond.price
 
           if (triggered) {
-            await fireAlert(alert, ticker.price)
+            await fireAlert(alert, ticker.price, undefined, ticker.pricePrecision)
           }
         } else if (alert.type === 'impulse') {
           const impulseCond = cond as ImpulseAlertCondition
@@ -36,7 +37,7 @@ export function startAlertEngine() {
             Math.abs(t.change24h) >= impulseCond.percent
           )
           for (const ticker of matchingTickers) {
-            await fireAlert(alert, ticker.price, ticker.symbol)
+            await fireAlert(alert, ticker.price, ticker.symbol, ticker.pricePrecision)
           }
         }
       }
@@ -51,7 +52,7 @@ export function stopAlertEngine() {
   }
 }
 
-async function fireAlert(alert: any, price: number, overrideSymbol?: string) {
+async function fireAlert(alert: any, price: number, overrideSymbol?: string, pricePrecision?: number) {
   await prisma.alert.update({
     where: { id: alert.id },
     data: { triggeredAt: new Date(), active: false },
@@ -70,7 +71,6 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string) {
 
   broadcast({ type: 'alert', data: alertData })
 
-  // Send Telegram notification
   const user = await prisma.user.findUnique({
     where: { id: alert.userId },
     select: { telegramChatId: true },
@@ -79,9 +79,10 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string) {
   if (user?.telegramChatId) {
     const icon = alert.type === 'price' ? '📈' : alert.type === 'impulse' ? '⚡' : '🆕'
     const typeLabel = alert.type === 'price' ? 'Пересечение цены' : alert.type === 'impulse' ? 'Импульс' : 'Листинг'
+    const formattedPrice = formatPriceByPrecision(price, pricePrecision ?? 2)
     const text = `${icon} <b>${typeLabel}</b>\n\n` +
       `<b>${symbol.replace('USDT', '/USDT')}</b>\n` +
-      `Цена: $${price.toFixed(2)}\n` +
+      `Цена: $${formattedPrice}\n` +
       `Биржа: ${alert.exchange || 'N/A'}`
     await sendTelegramMessage(user.telegramChatId, text)
   }

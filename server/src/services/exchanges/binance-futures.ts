@@ -1,6 +1,7 @@
 import WebSocket from 'ws'
 import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
+import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 
 const TF_MAP: Record<string, string> = {
   '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
@@ -20,15 +21,36 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private depthCbs: DepthCallback[] = []
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private reconnectCandleTimer: ReturnType<typeof setTimeout> | null = null
+  private precisionMap = new Map<string, number>()
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
   onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
 
   connect() {
+    this.fetchExchangeInfo()
     this.pollTickers()
     this.pollTimer = setInterval(() => this.pollTickers(), 2000)
     console.log(`[${this.name}] Connected (REST polling for tickers)`)
+  }
+
+  private async fetchExchangeInfo() {
+    try {
+      const res = await fetch('https://fapi.binance.com/fapi/v1/exchangeInfo')
+      const data = await res.json()
+      for (const s of data.symbols || []) {
+        if (!s.symbol.endsWith('USDT')) continue
+        for (const f of s.filters || []) {
+          if (f.filterType === 'PRICE_FILTER' && f.tickSize) {
+            this.precisionMap.set(s.symbol, precisionFromTickSize(f.tickSize))
+            break
+          }
+        }
+      }
+      console.log(`[${this.name}] Loaded precision for ${this.precisionMap.size} symbols`)
+    } catch (e) {
+      console.error(`[${this.name}] Failed to fetch exchangeInfo:`, e)
+    }
   }
 
   private async pollTickers() {
@@ -46,6 +68,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private parseTicker(t: any): UnifiedTicker {
     const price = parseFloat(t.lastPrice)
     const open = parseFloat(t.openPrice)
+    const pricePrecision = this.precisionMap.get(t.symbol) ?? fallbackPrecision(price)
     return {
       symbol: t.symbol,
       exchange: this.exchange,
@@ -58,6 +81,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       quoteVolume24h: parseFloat(t.quoteVolume || t.quoteVolume),
       range1m: 0,
       natr5m: 0,
+      pricePrecision,
       timestamp: Date.now(),
     }
   }

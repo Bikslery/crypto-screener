@@ -12,6 +12,7 @@ export interface UnifiedTicker {
   quoteVolume24h: number
   range1m: number
   natr5m: number
+  pricePrecision: number
   timestamp: number
 }
 
@@ -130,4 +131,5 @@ export interface DensityCell {
   volume: number
   distancePct: number
   marketCap: 'large' | 'medium' | 'small'
+  pricePrecision: number
 }

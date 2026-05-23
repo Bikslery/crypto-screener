@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useCoinListStore } from '../../store'
 import { wsOnMessage } from '../../services/ws'
 import type { DensityCell, UnifiedDepth } from '../../types.js'
+import { formatPrice, formatCompact } from '../../utils/format'
 
 function getMarketCapTier(quoteVolume: number): 'large' | 'medium' | 'small' {
   if (quoteVolume > 1e9) return 'large'
@@ -20,13 +21,6 @@ function exchangeLabel(ex: string): string {
   if (ex.includes('okx') && ex.includes('futures')) return 'OK-F'
   if (ex.includes('okx') && ex.includes('spot')) return 'OK-S'
   return 'EX'
-}
-
-function formatVol(n: number): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`
-  if (n >= 1e6) return `${(n / 1e6).toFixed(0)}M`
-  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`
-  return String(Math.round(n))
 }
 
 const TIER_STYLES: Record<string, { bg: string; border: string; text: string }> = {
@@ -60,6 +54,7 @@ export function DensityMap() {
               volume: qty * price,
               distancePct: getDistancePct(ticker.price, price),
               marketCap: getMarketCapTier(ticker.quoteVolume24h),
+              pricePrecision: ticker.pricePrecision,
             })
           }
         }
@@ -74,6 +69,7 @@ export function DensityMap() {
               volume: qty * price,
               distancePct: getDistancePct(ticker.price, price),
               marketCap: getMarketCapTier(ticker.quoteVolume24h),
+              pricePrecision: ticker.pricePrecision,
             })
           }
         }
@@ -130,11 +126,11 @@ export function DensityMap() {
               key={`${cell.symbol}-${cell.price}-${cell.side}`}
               className={`flex items-center justify-between px-2.5 py-1.5 rounded-[6px] border cursor-pointer hover:brightness-110 transition-all ${style.bg} ${style.border}`}
               onClick={() => selectCoin(cell.symbol)}
-              title={`${cell.symbol} ${cell.side.toUpperCase()} $${formatVol(cell.volume)} @ ${cell.price.toFixed(4)} (${cell.distancePct.toFixed(2)}%)`}
+              title={`${cell.symbol} ${cell.side.toUpperCase()} $${formatCompact(cell.volume)} @ ${formatPrice(cell.price, cell.pricePrecision)} (${cell.distancePct.toFixed(2)}%)`}
             >
               <span className="text-[9px] text-[#555] font-mono">{exchangeLabel(cell.exchange)}</span>
               <span className="font-bold text-[11px] text-[#e5e5e5]">{cell.symbol.replace('USDT', '')}</span>
-              <span className="font-mono text-[10px] text-[#888]">${formatVol(cell.volume)}</span>
+              <span className="font-mono text-[10px] text-[#888]">${formatCompact(cell.volume)}</span>
             </div>
           )
         })}

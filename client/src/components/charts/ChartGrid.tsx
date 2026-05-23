@@ -5,24 +5,11 @@ import { useCoinListStore } from '../../store'
 import { wsOnMessage, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import api from '../../services/api'
 import type { Timeframe, UnifiedCandle } from '../../types'
+import { formatPrice, formatCompact } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 
 const UP_COLOR = '#26a65b'
 const DOWN_COLOR = '#e74c3c'
-
-function formatPrice(p: number | undefined): string {
-  if (!p) return ''
-  if (p >= 1000) return p.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
-  if (p >= 1) return p.toFixed(2)
-  return p.toFixed(5)
-}
-
-function formatCompact(n: number): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`
-  if (n >= 1e6) return `${(n / 1e6).toFixed(0)}M`
-  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`
-  return String(Math.round(n))
-}
 
 function exchangeBadge(ex: string): string {
   if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
@@ -222,6 +209,11 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
       upColor: UP_COLOR, downColor: DOWN_COLOR,
       borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+      priceFormat: {
+        type: 'price',
+        precision: coin?.pricePrecision ?? 2,
+        minMove: Math.pow(10, -(coin?.pricePrecision ?? 2)),
+      },
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
     chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, textColor: '#666666' })
@@ -269,6 +261,7 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
 
   const badge = exchangeBadge(coin?.exchange || '')
   const vol = coin ? formatCompact(coin.quoteVolume24h) : '-'
+  const precision = coin?.pricePrecision ?? 2
 
   return (
     <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
@@ -343,6 +336,11 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       upColor: UP_COLOR, downColor: DOWN_COLOR,
       borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+      priceFormat: {
+        type: 'price',
+        precision: coin?.pricePrecision ?? 2,
+        minMove: Math.pow(10, -(coin?.pricePrecision ?? 2)),
+      },
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
     chart.priceScale('').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 }, textColor: '#666666' })
@@ -389,13 +387,8 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   useWsTrade(symbol, tf, candleRef, volumeRef, destroyedRef)
 
   const badge = exchangeBadge(coin?.exchange || '')
-  const volDisplay = coin
-    ? coin.quoteVolume24h > 1e9
-      ? `${(coin.quoteVolume24h / 1e9).toFixed(1)}B`
-      : coin.quoteVolume24h > 1e6
-        ? `${(coin.quoteVolume24h / 1e6).toFixed(0)}M`
-        : `${(coin.quoteVolume24h / 1e3).toFixed(0)}K`
-    : '-'
+  const volDisplay = coin ? formatCompact(coin.quoteVolume24h) : '-'
+  const precision = coin?.pricePrecision ?? 2
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
@@ -425,13 +418,13 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
           </span>
         </div>
 
-        <span className="font-mono font-bold text-[13px] text-[#e0e0e0]">{coin ? `$${formatPrice(coin.price)}` : ''}</span>
+        <span className="font-mono font-bold text-[13px] text-[#e0e0e0]">{coin ? `$${formatPrice(coin.price, precision)}` : ''}</span>
 
         <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
 
         <div className="flex items-center gap-[6px] text-[11px] text-[#888]">
-          <span>H: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.high24h)}` : '-'}</span></span>
-          <span>L: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.low24h)}` : '-'}</span></span>
+          <span>H: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.high24h, precision)}` : '-'}</span></span>
+          <span>L: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.low24h, precision)}` : '-'}</span></span>
         </div>
 
         <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />

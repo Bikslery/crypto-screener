@@ -1,6 +1,7 @@
 import WebSocket from 'ws'
 import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
+import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 
 export class BybitFuturesAdapter implements ExchangeAdapter {
   name = 'Bybit Futures'
@@ -14,12 +15,14 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private subscribedSymbols = new Set<string>()
+  private precisionMap = new Map<string, number>()
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
   onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
 
   connect() {
+    this.fetchInstruments()
     const url = 'wss://stream.bybit.com/v5/public/linear'
     this.ws = new WebSocket(url)
     this.ws.on('open', () => {
@@ -48,9 +51,28 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     this.ws.on('error', () => this.scheduleReconnect())
   }
 
+  private async fetchInstruments() {
+    try {
+      const res = await fetch('https://api.bybit.com/v5/market/instruments?category=linear')
+      const json = await res.json()
+      if (json.retCode !== 0 || !json.result?.list) return
+      for (const inst of json.result.list) {
+        if (!inst.symbol?.endsWith('USDT')) continue
+        const tickSize = inst.priceFilter?.tickSize
+        if (tickSize) {
+          this.precisionMap.set(inst.symbol, precisionFromTickSize(tickSize))
+        }
+      }
+      console.log(`[${this.name}] Loaded precision for ${this.precisionMap.size} instruments`)
+    } catch (e) {
+      console.error(`[${this.name}] Failed to fetch instruments:`, e)
+    }
+  }
+
   private parseTicker(d: any): UnifiedTicker {
     const price = parseFloat(d.lastPrice)
     const open = parseFloat(d.prevPrice24h) || price
+    const pricePrecision = this.precisionMap.get(d.symbol) ?? fallbackPrecision(price)
     return {
       symbol: d.symbol,
       exchange: this.exchange,
@@ -63,6 +85,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
       quoteVolume24h: parseFloat(d.turnover24h),
       range1m: 0,
       natr5m: 0,
+      pricePrecision,
       timestamp: Date.now(),
     }
   }

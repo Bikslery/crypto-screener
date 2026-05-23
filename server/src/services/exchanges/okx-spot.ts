@@ -1,6 +1,7 @@
 import WebSocket from 'ws'
 import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
+import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 
 export class OkxSpotAdapter implements ExchangeAdapter {
   name = 'OKX Spot'
@@ -13,12 +14,14 @@ export class OkxSpotAdapter implements ExchangeAdapter {
   private depthCbs: DepthCallback[] = []
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
+  private precisionMap = new Map<string, number>()
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
   onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
 
   connect() {
+    this.fetchInstruments()
     const url = 'wss://ws.okx.com:8443/ws/v5/public'
     this.ws = new WebSocket(url)
     this.ws.on('open', () => {
@@ -47,12 +50,32 @@ export class OkxSpotAdapter implements ExchangeAdapter {
     this.ws.on('error', () => this.scheduleReconnect())
   }
 
+  private async fetchInstruments() {
+    try {
+      const res = await fetch('https://www.okx.com/api/v5/public/instruments?instType=SPOT')
+      const json = await res.json()
+      if (json.code !== '0' || !json.data) return
+      for (const inst of json.data) {
+        if (!inst.instId?.endsWith('-USDT')) continue
+        const symbol = inst.instId.replace('-USDT', 'USDT')
+        if (inst.tickSz) {
+          this.precisionMap.set(symbol, precisionFromTickSize(inst.tickSz))
+        }
+      }
+      console.log(`[${this.name}] Loaded precision for ${this.precisionMap.size} instruments`)
+    } catch (e) {
+      console.error(`[${this.name}] Failed to fetch instruments:`, e)
+    }
+  }
+
   private parseTicker(d: any): UnifiedTicker | null {
     if (!d) return null
     const price = parseFloat(d.last)
     const open = parseFloat(d.open24h) || price
+    const symbol = d.instId?.replace('-USDT', 'USDT') || d.instId || ''
+    const pricePrecision = this.precisionMap.get(symbol) ?? fallbackPrecision(price)
     return {
-      symbol: d.instId?.replace('-USDT', 'USDT') || d.instId || '',
+      symbol,
       exchange: this.exchange,
       price,
       change24h: open > 0 ? ((price - open) / open) * 100 : 0,
@@ -63,6 +86,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
       quoteVolume24h: parseFloat(d.volCcy24h),
       range1m: 0,
       natr5m: 0,
+      pricePrecision,
       timestamp: Date.now(),
     }
   }

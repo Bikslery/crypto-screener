@@ -1,5 +1,6 @@
 import { useCoinListStore } from '../../store'
 import type { UnifiedTicker } from '../../types'
+import { formatCompact } from '../../utils/format'
 
 type ColKey = keyof UnifiedTicker
 
@@ -33,7 +34,7 @@ function formatVal(key: ColKey, coin: UnifiedTicker): string {
   if (key === 'range1m' || key === 'natr5m') return v ? `${(v as number).toFixed(1)}` : '-'
   if (key === 'quoteVolume24h') {
     const n = v as number
-    return n > 1e9 ? `${(n / 1e9).toFixed(1)}B` : n > 1e6 ? `${(n / 1e6).toFixed(0)}M` : n > 1e3 ? `${(n / 1e3).toFixed(0)}K` : String(Math.round(n))
+    return formatCompact(n)
   }
   return String(v)
 }
