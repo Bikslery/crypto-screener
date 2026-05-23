@@ -3,7 +3,7 @@ import { broadcast } from '../../ws/hub.js'
 import { prisma } from '../../db/index.js'
 import { sendTelegramMessage } from '../telegram/bot.js'
 import type { PriceAlertCondition, ImpulseAlertCondition } from '../../types.js'
-import { formatPriceByPrecision } from '../../utils/format.js'
+import { formatPriceByPrecision, extractBaseAsset } from '../../utils/format.js'
 
 let checkInterval: ReturnType<typeof setInterval> | null = null
 
@@ -81,7 +81,7 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string, pri
     const typeLabel = alert.type === 'price' ? 'Пересечение цены' : alert.type === 'impulse' ? 'Импульс' : 'Листинг'
     const formattedPrice = formatPriceByPrecision(price, pricePrecision ?? 2)
     const text = `${icon} <b>${typeLabel}</b>\n\n` +
-      `<b>${symbol.replace('USDT', '/USDT')}</b>\n` +
+      `<b>${extractBaseAsset(symbol)}</b>\n` +
       `Цена: $${formattedPrice}\n` +
       `Биржа: ${alert.exchange || 'N/A'}`
     await sendTelegramMessage(user.telegramChatId, text)

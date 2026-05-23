@@ -1,6 +1,6 @@
 import { useCoinListStore } from '../../store'
 import type { UnifiedTicker } from '../../types'
-import { formatCompact } from '../../utils/format'
+import { formatCompact, extractBaseAsset } from '../../utils/format'
 
 type ColKey = keyof UnifiedTicker
 
@@ -12,7 +12,7 @@ interface ColumnDef {
 }
 
 const COLS: ColumnDef[] = [
-  { key: 'symbol', header: 'Тикер', subheader: '', width: '120px' },
+  { key: 'symbol', header: 'Тикер', subheader: '', width: '80px' },
   { key: 'change24h', header: 'ИЗМ', subheader: '24ч', width: '72px' },
   { key: 'range1m', header: 'РЕНЖ', subheader: '1м/5', width: '72px' },
   { key: 'natr5m', header: 'NATR', subheader: '5м/14', width: '72px' },
@@ -29,7 +29,7 @@ function ArrowFlag() {
 
 function formatVal(key: ColKey, coin: UnifiedTicker): string {
   const v = coin[key]
-  if (key === 'symbol') return (v as string).replace('USDT', '/USDT')
+  if (key === 'symbol') return extractBaseAsset(v as string)
   if (key === 'change24h') return `${v >= 0 ? '+' : ''}${(v as number).toFixed(1)}`
   if (key === 'range1m' || key === 'natr5m') return v ? `${(v as number).toFixed(1)}` : '-'
   if (key === 'quoteVolume24h') {
@@ -51,7 +51,7 @@ export function CoinList() {
       {/* Header */}
       <div
         className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
-        style={{ gridTemplateColumns: '120px 72px 72px 72px 80px', fontFamily: "'Inter', sans-serif" }}
+        style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', fontFamily: "'Inter', sans-serif" }}
       >
         {COLS.map((col, i) => (
           <div
@@ -83,7 +83,7 @@ export function CoinList() {
               className={`grid cursor-pointer border-b border-[#111] transition-colors duration-100 ${
                 isSelected ? 'bg-white/[0.04]' : 'hover:bg-white/[0.02]'
               } ${isSelected ? 'border-l-2 border-l-white' : 'border-l-2 border-l-transparent'}`}
-              style={{ gridTemplateColumns: '120px 72px 72px 72px 80px', height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
+              style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
               onClick={() => expandChart(coin.symbol)}
             >
               {/* Тикер */}

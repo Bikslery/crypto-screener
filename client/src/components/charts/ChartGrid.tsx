@@ -5,7 +5,7 @@ import { useCoinListStore } from '../../store'
 import { wsOnMessage, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import api from '../../services/api'
 import type { Timeframe, UnifiedCandle } from '../../types'
-import { formatPrice, formatCompact } from '../../utils/format'
+import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 
 const UP_COLOR = '#26a65b'
@@ -268,7 +268,7 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
       {/* Водяной знак */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
         <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'Inter', sans-serif" }}>
-          {symbol.replace('USDT', '')}
+          {extractBaseAsset(symbol)}
         </span>
       </div>
 
@@ -281,7 +281,7 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
             {badge}
           </span>
           <span className="font-bold text-[11px] text-[#e0e0e0] truncate" style={{ fontFamily: "'Inter', sans-serif" }}>
-            {symbol.replace('USDT', '/USDT')}
+            {extractBaseAsset(symbol)}
           </span>
         </div>
         <div className="flex items-center gap-[6px] flex-shrink-0">
@@ -406,7 +406,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
             {badge}
           </span>
           <span className="font-bold text-[14px] text-[#f0f0f0] tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>
-            {symbol.replace('USDT', '/USDT')}
+            {extractBaseAsset(symbol)}
           </span>
         </div>
 

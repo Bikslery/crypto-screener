@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAlertStore, useAuthStore } from '../../store'
 import api from '../../services/api'
-import { formatPrice } from '../../utils/format'
+import { formatPrice, extractBaseAsset } from '../../utils/format'
 import { Bell, TrendingUp, List, BellOff, X, Plus } from 'lucide-react'
 
 const ALERT_STYLES: Record<string, { bg: string; border: string; text: string; label: string; icon: any }> = {
@@ -155,7 +155,7 @@ export function AlertStack() {
                   <span className="text-[10px] text-[#888]">{new Date(alert.triggeredAt || Date.now()).toLocaleTimeString('ru-RU')}</span>
                 </div>
                 <div className="font-mono font-bold text-[13px] text-white">
-                  {alert.symbol?.replace('USDT', '/USDT') || 'ANY'}
+                  {extractBaseAsset(alert.symbol) || 'ANY'}
                 </div>
                 <div className="text-[11px] text-[#888]">
                   {alert.type === 'price' && (

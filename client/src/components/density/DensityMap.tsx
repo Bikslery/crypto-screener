@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useCoinListStore } from '../../store'
 import { wsOnMessage } from '../../services/ws'
 import type { DensityCell, UnifiedDepth } from '../../types.js'
-import { formatPrice, formatCompact } from '../../utils/format'
+import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 
 function getMarketCapTier(quoteVolume: number): 'large' | 'medium' | 'small' {
   if (quoteVolume > 1e9) return 'large'
@@ -129,7 +129,7 @@ export function DensityMap() {
               title={`${cell.symbol} ${cell.side.toUpperCase()} $${formatCompact(cell.volume)} @ ${formatPrice(cell.price, cell.pricePrecision)} (${cell.distancePct.toFixed(2)}%)`}
             >
               <span className="text-[9px] text-[#555] font-mono">{exchangeLabel(cell.exchange)}</span>
-              <span className="font-bold text-[11px] text-[#e5e5e5]">{cell.symbol.replace('USDT', '')}</span>
+              <span className="font-bold text-[11px] text-[#e5e5e5]">{extractBaseAsset(cell.symbol)}</span>
               <span className="font-mono text-[10px] text-[#888]">${formatCompact(cell.volume)}</span>
             </div>
           )
