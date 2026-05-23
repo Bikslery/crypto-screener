@@ -1,0 +1,35 @@
+import { Router } from 'express'
+import { authMiddleware } from '../middleware/auth.js'
+import { prisma } from '../db/index.js'
+
+const router = Router()
+
+router.use(authMiddleware)
+
+router.get('/', async (req, res) => {
+  const { userId } = (req as any).user
+  const { symbol, timeframe } = req.query
+  const where: any = { userId }
+  if (symbol) where.symbol = symbol
+  if (timeframe) where.timeframe = timeframe
+  const drawings = await prisma.drawing.findMany({ where })
+  res.json(drawings.map(d => ({ ...d, data: JSON.parse(d.data) })))
+})
+
+router.post('/', async (req, res) => {
+  const { userId } = (req as any).user
+  const { symbol, timeframe, type, data } = req.body
+  const drawing = await prisma.drawing.create({
+    data: { userId, symbol, timeframe, type, data: JSON.stringify(data) },
+  })
+  res.json({ ...drawing, data: JSON.parse(drawing.data) })
+})
+
+router.delete('/:id', async (req, res) => {
+  const { userId } = (req as any).user
+  const { id } = req.params
+  await prisma.drawing.delete({ where: { id, userId } })
+  res.json({ ok: true })
+})
+
+export default router
