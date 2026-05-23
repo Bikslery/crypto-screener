@@ -6,7 +6,7 @@ import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
 import { broadcast } from '../../ws/hub.js'
 
-const adapters: ExchangeAdapter[] = [
+export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
   new BinanceFuturesAdapter(),
   // new BybitFuturesAdapter(),
@@ -33,7 +33,7 @@ function pickBest(tickers: UnifiedTicker[]): Map<string, UnifiedTicker> {
 }
 
 let lastBroadcast = 0
-const BROADCAST_INTERVAL = 1000
+const BROADCAST_INTERVAL = 50 // 50ms for near real-time
 let loggedFirst = false
 let tickerCount = 0
 const metricsMap = new Map<string, { range1m: number; natr5m: number }>()

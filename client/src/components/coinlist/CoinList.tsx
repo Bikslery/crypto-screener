@@ -3,19 +3,34 @@ import type { UnifiedTicker } from '../../types'
 
 type ColKey = keyof UnifiedTicker
 
-const COLS: { key: ColKey; label: string }[] = [
-  { key: 'symbol', label: 'Монета' },
-  { key: 'change24h', label: 'Изм День' },
-  { key: 'range1m', label: 'Ренж 1М.5' },
-  { key: 'natr5m', label: 'NATR 5М/14' },
-  { key: 'quoteVolume24h', label: 'Объем 24ч' },
+interface ColumnDef {
+  key: ColKey
+  header: string
+  subheader: string
+  width: string
+}
+
+const COLS: ColumnDef[] = [
+  { key: 'symbol', header: 'Тикер', subheader: '', width: '120px' },
+  { key: 'change24h', header: 'ИЗМ', subheader: '24ч', width: '72px' },
+  { key: 'range1m', header: 'РЕНЖ', subheader: '1м/5', width: '72px' },
+  { key: 'natr5m', header: 'NATR', subheader: '5м/14', width: '72px' },
+  { key: 'quoteVolume24h', header: 'ОБЪЁМ', subheader: '24ч', width: '80px' },
 ]
+
+function ArrowFlag() {
+  return (
+    <svg width="0.7em" height="0.7em" viewBox="0 0 8 8" fill="none" className="inline-block mr-1 text-[#555] shrink-0">
+      <path d="M8 8L5 4L8 0H0V8H8Z" fill="currentColor" />
+    </svg>
+  )
+}
 
 function formatVal(key: ColKey, coin: UnifiedTicker): string {
   const v = coin[key]
   if (key === 'symbol') return (v as string).replace('USDT', '/USDT')
-  if (key === 'change24h') return `${v >= 0 ? '+' : ''}${(v as number).toFixed(1)}%`
-  if (key === 'range1m' || key === 'natr5m') return v ? `${(v as number).toFixed(2)}%` : '-'
+  if (key === 'change24h') return `${v >= 0 ? '+' : ''}${(v as number).toFixed(1)}`
+  if (key === 'range1m' || key === 'natr5m') return v ? `${(v as number).toFixed(1)}` : '-'
   if (key === 'quoteVolume24h') {
     const n = v as number
     return n > 1e9 ? `${(n / 1e9).toFixed(1)}B` : n > 1e6 ? `${(n / 1e6).toFixed(0)}M` : n > 1e3 ? `${(n / 1e3).toFixed(0)}K` : String(Math.round(n))
@@ -24,44 +39,77 @@ function formatVal(key: ColKey, coin: UnifiedTicker): string {
 }
 
 export function CoinList() {
-  const { sortedCoins, sortBy, sortDir, selectedSymbol, setSort, expandChart } = useCoinListStore()
+  const { sortedCoins, sortBy, sortDir, selectedSymbol, setSort, expandChart, filterExchange } = useCoinListStore()
+
+  const filtered = filterExchange === 'all'
+    ? sortedCoins
+    : sortedCoins.filter(c => c.exchange.includes(filterExchange))
 
   return (
-    <div className="w-[400px] h-full flex flex-col bg-[#0f0f0f]">
-      <div className="grid grid-cols-[3fr_2fr_2fr_2fr_2fr] border-b border-[#242424] bg-[#1a1a1a] text-[11px] font-semibold text-[#555] select-none flex-shrink-0">
+    <div className="w-[400px] h-full flex flex-col bg-[#0a0a0a]">
+      {/* Header */}
+      <div
+        className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
+        style={{ gridTemplateColumns: '120px 72px 72px 72px 80px', fontFamily: "'Inter', sans-serif" }}
+      >
         {COLS.map((col, i) => (
-          <span
+          <div
             key={col.key}
-            className={`px-3 py-2 text-center cursor-pointer hover:text-[#999] ${i < COLS.length - 1 ? 'border-r border-[#242424]' : ''} ${sortBy === col.key ? 'text-[#6f4db3]' : ''}`}
+            className={`flex flex-col items-center justify-center cursor-pointer hover:text-[#aaa] transition-colors py-1 ${
+              i < COLS.length - 1 ? 'border-r border-[#1f1f1f]' : ''
+            } ${sortBy === col.key ? 'text-[#fff]' : 'text-[#888]'}`}
+            style={{ height: '40px' }}
             onClick={() => setSort(col.key)}
           >
-            {col.label}{sortBy === col.key ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
-          </span>
+            <span className="font-medium text-[11px] leading-tight">
+              {col.header}{sortBy === col.key ? (sortDir === 'desc' ? ' ▼' : ' ▲') : ''}
+            </span>
+            {col.subheader && (
+              <span className="text-[10px] text-[#555] leading-tight">{col.subheader}</span>
+            )}
+          </div>
         ))}
       </div>
 
+      {/* Rows */}
       <div className="flex-1 overflow-y-auto">
-        {sortedCoins.map(coin => {
+        {filtered.map(coin => {
           const isSelected = selectedSymbol === coin.symbol
           const isUp = coin.change24h >= 0
-          const cellBorder = 'border-r border-[#1e1e1e]'
           return (
             <div
               key={coin.symbol}
-              className={`grid grid-cols-[3fr_2fr_2fr_2fr_2fr] cursor-pointer border-b border-[#1e1e1e] transition-colors ${
-                isSelected ? 'bg-[#6f4db3]/20' : 'hover:bg-[#242424]'
-              }`}
+              className={`grid cursor-pointer border-b border-[#111] transition-colors duration-100 ${
+                isSelected ? 'bg-white/[0.04]' : 'hover:bg-white/[0.02]'
+              } ${isSelected ? 'border-l-2 border-l-white' : 'border-l-2 border-l-transparent'}`}
+              style={{ gridTemplateColumns: '120px 72px 72px 72px 80px', height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
               onClick={() => expandChart(coin.symbol)}
             >
-              <span className={`font-bold text-[12px] text-center px-3 py-[5px] ${isSelected ? 'text-white' : 'text-[#f2f2f2]'} ${cellBorder}`}>
+              {/* Тикер */}
+              <div className={`flex items-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
+                <ArrowFlag />
                 {formatVal('symbol', coin)}
-              </span>
-              <span className={`font-mono font-bold text-[12px] text-center px-3 py-[5px] ${isSelected ? 'text-white' : isUp ? 'text-[#4bd24b]' : 'text-[#d24b4b]'} ${cellBorder}`}>
-                {formatVal('change24h', coin)}
-              </span>
-              <span className={`font-mono text-[11px] text-center px-3 py-[5px] text-[#666] ${cellBorder}`}>{formatVal('range1m', coin)}</span>
-              <span className={`font-mono text-[11px] text-center px-3 py-[5px] text-[#666] ${cellBorder}`}>{formatVal('natr5m', coin)}</span>
-              <span className="font-mono text-[11px] text-center px-3 py-[5px] text-[#888]">{formatVal('quoteVolume24h', coin)}</span>
+              </div>
+
+              {/* ИЗМ */}
+              <div className={`flex items-center justify-end px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+                {formatVal('change24h', coin)}%
+              </div>
+
+              {/* РЕНЖ */}
+              <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
+                {formatVal('range1m', coin)}
+              </div>
+
+              {/* NATR */}
+              <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
+                {formatVal('natr5m', coin)}
+              </div>
+
+              {/* ОБЪЁМ */}
+              <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0]">
+                {formatVal('quoteVolume24h', coin)}
+              </div>
             </div>
           )
         })}

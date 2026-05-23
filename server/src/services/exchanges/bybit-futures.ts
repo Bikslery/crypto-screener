@@ -95,6 +95,22 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     }
   }
 
+  subscribeCandle(_symbol: string, _tf: string, _cb: CandleCallback) {
+    // TODO: implement Bybit kline subscription
+  }
+
+  unsubscribeCandle(_symbol: string, _tf: string) {
+    // TODO
+  }
+
+  subscribeDepth(_symbol: string, _cb: DepthCallback) {
+    // TODO: implement Bybit orderbook subscription
+  }
+
+  unsubscribeDepth(_symbol: string) {
+    // TODO
+  }
+
   disconnect() {
     this.ws?.close()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
@@ -103,7 +119,9 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
 
   async fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]> {
     const category = 'linear'
-    const url = `https://api.bybit.com/v5/market/kline?category=${category}&symbol=${symbol}&interval=${tf}&limit=${limit}`
+    const bybitTfMap: Record<string, string> = { '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '2h': '120', '4h': '240', '1d': 'D', '1w': 'W' }
+    const interval = bybitTfMap[tf] || tf
+    const url = `https://api.bybit.com/v5/market/kline?category=${category}&symbol=${symbol}&interval=${interval}&limit=${limit}`
     const res = await fetch(url)
     const json = await res.json()
     if (json.retCode !== 0 || !json.result?.list) return []

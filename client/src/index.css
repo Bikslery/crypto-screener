@@ -1,27 +1,48 @@
 @import "tailwindcss";
 
 :root {
+  /* Цвета фона (TZ) */
+  --bg: #0a0a0a;
+  --bg-surface: #0e0e0e;
+  --bg-elevated: #141414;
+  --bg-head: #1a1a1a;
+  --bg-hover: #1a1a1a;
+  --bg-border: #222222;
+
+  /* Текст (TZ) */
+  --text-primary: #ffffff;
+  --text-secondary: #e5e5e5;
+  --text-muted: #a0a0a0;
+  --text-faint: #555555;
+
+  /* Акценты (TZ) */
+  --color-up: #26a65b;
+  --color-down: #e74c3c;
+  --color-accent: #f9b600;
+
+  /* Границы (TZ) */
+  --border-color: #1f1f1f;
+  --border-hover: #2a2a2a;
+
+  /* Legacy переменные (для совместимости пока не всё переименовано) */
   --primary: #6f4db3;
   --primary-glow: #6f4db355;
-  --bg: #0a0a0b;
-  --bg-block: #141414;
-  --bg-head: #1a1a1a;
-  --bg-hover: #242424;
+  --bg-block: #0e0e0e;
   --bg-focused: #3d3d3d;
   --bg-selected: #6f4db3;
-  --fg: #cccccc;
-  --fg-75: #ccccccbf;
-  --fg-50: #cccccc80;
-  --fg-25: #cccccc40;
-  --fg-10: #cccccc1a;
+  --fg: #e5e5e5;
+  --fg-75: #e5e5e5bf;
+  --fg-50: #a0a0a080;
+  --fg-25: #55555566;
+  --fg-10: #5555551a;
   --fg-alt: #333333;
-  --border: #242424;
+  --border: #1f1f1f;
   --scrollbar: #666666;
-  --candle-up: #4bd24b;
-  --candle-down: #d24b4b;
-  --grid: #242424;
+  --candle-up: #26a65b;
+  --candle-down: #e74c3c;
+  --grid: #1a1a1a;
   --crosshair: #4d4d4d;
-  --price-label: #b3b3b3;
+  --price-label: #666666;
   --volume: #4d4d4d;
 }
 
@@ -31,7 +52,9 @@ html, body, #root {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   background: var(--bg);
   color: var(--fg);
   font-size: 13px;
@@ -41,4 +64,6 @@ html, body, #root {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
 
-.font-mono { font-family: ui-monospace, Consolas, 'Courier New', monospace; }
+.font-mono { font-family: 'JetBrains Mono', ui-monospace, Consolas, 'Courier New', monospace; }
+
+a[href*="tradingview.com"] { display: none !important; }

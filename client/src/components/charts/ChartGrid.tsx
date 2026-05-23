@@ -1,20 +1,36 @@
-import { useEffect, useRef, useState, memo } from 'react'
+import { useEffect, useRef, memo, useState } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore } from '../../store'
-import { wsOnMessage, wsSubscribe } from '../../services/ws'
+import { wsOnMessage, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import api from '../../services/api'
 import type { Timeframe, UnifiedCandle } from '../../types'
 import { ArrowLeft } from 'lucide-react'
 
-const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m']
-const EXPANDED_TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '1h']
+const UP_COLOR = '#26a65b'
+const DOWN_COLOR = '#e74c3c'
 
 function formatPrice(p: number | undefined): string {
   if (!p) return ''
   if (p >= 1000) return p.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
   if (p >= 1) return p.toFixed(2)
   return p.toFixed(5)
+}
+
+function formatCompact(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`
+  if (n >= 1e6) return `${(n / 1e6).toFixed(0)}M`
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`
+  return String(Math.round(n))
+}
+
+function exchangeBadge(ex: string): string {
+  if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
+  if (ex.includes('binance') && ex.includes('spot')) return 'BI-S'
+  if (ex.includes('bybit')) return 'BY-F'
+  if (ex.includes('okx') && ex.includes('futures')) return 'OK-F'
+  if (ex.includes('okx') && ex.includes('spot')) return 'OK-S'
+  return 'EX'
 }
 
 function useCandles(symbol: string, tf: Timeframe, candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>, volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>, chartRef: React.RefObject<IChartApi | null>, destroyedRef: React.RefObject<boolean>, limit = 300) {
@@ -38,7 +54,7 @@ function useCandles(symbol: string, tf: Timeframe, candleRef: React.RefObject<IS
         const volumeData = candles.map(c => ({
           time: c.time as Time,
           value: c.volume,
-          color: c.close >= c.open ? '#4bd24b44' : '#d24b4b44',
+          color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
         }))
         candleRef.current.setData(candleData)
         volumeRef.current.setData(volumeData)
@@ -73,7 +89,7 @@ function useWsCandle(symbol: string, tf: Timeframe, candleRef: React.RefObject<I
           volumeRef.current.update({
             time: c.time as Time,
             value: c.volume,
-            color: c.close >= c.open ? '#4bd24b44' : '#d24b4b44',
+            color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
           })
         } catch {}
       }
@@ -86,8 +102,76 @@ function useWsCandle(symbol: string, tf: Timeframe, candleRef: React.RefObject<I
         wsUnsubRef.current()
         wsUnsubRef.current = null
       }
+      wsUnsubscribe(`candle:${symbol}:${tf}`)
     }
   }, [symbol, tf])
+}
+
+function useWsTrade(symbol: string, tf: Timeframe, candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>, volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>, destroyedRef: React.RefObject<boolean>) {
+  const currentCandleRef = useRef<{ time: number; open: number; high: number; low: number; close: number; volume: number } | null>(null)
+
+  useEffect(() => {
+    currentCandleRef.current = null
+
+    const unsub = wsOnMessage((msg) => {
+      if (destroyedRef.current) return
+      if (msg.type === `trade:${symbol}`) {
+        const trade = msg.data as any
+        if (!candleRef.current || !volumeRef.current || !trade?.price) return
+
+        try {
+          const price = parseFloat(trade.price)
+          const now = Math.floor(Date.now() / 1000)
+
+          // Align time to timeframe interval
+          const tfSeconds = getTfSeconds(tf)
+          const candleTime = Math.floor(now / tfSeconds) * tfSeconds
+
+          let candle = currentCandleRef.current
+          if (!candle || candle.time !== candleTime) {
+            // New candle started
+            candle = {
+              time: candleTime,
+              open: price,
+              high: price,
+              low: price,
+              close: price,
+              volume: trade.volume || 0,
+            }
+            currentCandleRef.current = candle
+          } else {
+            // Update existing candle
+            candle.high = Math.max(candle.high, price)
+            candle.low = Math.min(candle.low, price)
+            candle.close = price
+            candle.volume += trade.volume || 0
+          }
+
+          candleRef.current.update({
+            time: candle.time as Time,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+          })
+        } catch {}
+      }
+    })
+    wsSubscribe(`trade:${symbol}`)
+
+    return () => {
+      unsub()
+      wsUnsubscribe(`trade:${symbol}`)
+    }
+  }, [symbol, tf])
+}
+
+function getTfSeconds(tf: Timeframe): number {
+  const map: Record<string, number> = {
+    '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+    '1h': 3600, '2h': 7200, '4h': 14400, '1d': 86400, '1w': 604800,
+  }
+  return map[tf] || 60
 }
 
 const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
@@ -95,30 +179,52 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const [tf, setTf] = useState<Timeframe>('1m')
+  const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const coin = useCoinListStore(s => s.sortedCoins.find(c => c.symbol === symbol))
   const isUp = coin ? coin.change24h >= 0 : true
+  const [flash, setFlash] = useState<'green' | 'red' | null>(null)
+  const prevPriceRef = useRef<number | null>(null)
+
+  // Flash effect on price change
+  useEffect(() => {
+    if (!coin) return
+    const currentPrice = coin.price
+    const prevPrice = prevPriceRef.current
+    if (prevPrice !== null && currentPrice !== prevPrice) {
+      setFlash(currentPrice > prevPrice ? 'green' : 'red')
+      const timer = setTimeout(() => setFlash(null), 300)
+      return () => clearTimeout(timer)
+    }
+    prevPriceRef.current = currentPrice
+  }, [coin?.price])
 
   useEffect(() => {
     destroyedRef.current = false
     if (!containerRef.current) return
 
     const chart = createChart(containerRef.current, {
-      layout: { background: { type: ColorType.Solid, color: '#0f0f0f' }, textColor: '#555', fontSize: 9 },
+      layout: { background: { type: ColorType.Solid, color: '#0e0e0e' }, textColor: '#666666', fontSize: 9, fontFamily: "'Inter', sans-serif" },
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
-      crosshair: { mode: CrosshairMode.Normal, vertLine: { visible: false }, horzLine: { visible: false } },
-      rightPriceScale: { borderColor: '#1a1a1a', scaleMargins: { top: 0.1, bottom: 0.2 } },
-      timeScale: { borderColor: '#1a1a1a', timeVisible: true, visible: false },
+      crosshair: { mode: CrosshairMode.Normal, vertLine: { visible: true, color: '#4d4d4d' }, horzLine: { visible: true, color: '#4d4d4d' } },
+      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.1, bottom: 0.25 }, textColor: '#666666' },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, textColor: '#666666', barSpacing: 6 },
+      handleScroll: true,
+      handleScale: {
+        axisPressedMouseMove: { time: true, price: true },
+        pinch: true,
+        mouseWheel: true,
+      },
+      kineticScroll: { touch: false, mouse: false },
     })
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#4bd24b', downColor: '#d24b4b',
-      borderUpColor: '#4bd24b', borderDownColor: '#d24b4b',
-      wickUpColor: '#4bd24b', wickDownColor: '#d24b4b',
+      upColor: UP_COLOR, downColor: DOWN_COLOR,
+      borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
+      wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
     candleRef.current = candleSeries
@@ -131,24 +237,75 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
     })
     ro.observe(containerRef.current)
 
-    return () => { destroyedRef.current = true; ro.disconnect(); chart.remove(); chartRef.current = null; candleRef.current = null; volumeRef.current = null }
+    // Ctrl + wheel changes bar spacing (candle width)
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        const ts = chart.timeScale()
+        const options = ts.options()
+        const currentSpacing = (options as any).barSpacing || 6
+        const delta = e.deltaY > 0 ? -0.5 : 0.5
+        const newSpacing = Math.max(1, Math.min(30, currentSpacing + delta))
+        ts.applyOptions({ barSpacing: newSpacing })
+      }
+    }
+    containerRef.current.addEventListener('wheel', onWheel, { passive: false })
+
+    return () => {
+      destroyedRef.current = true
+      containerRef.current?.removeEventListener('wheel', onWheel)
+      ro.disconnect()
+      chart.remove()
+      chartRef.current = null
+      candleRef.current = null
+      volumeRef.current = null
+    }
   }, [symbol, tf])
 
   useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 300)
   useWsCandle(symbol, tf, candleRef, volumeRef, destroyedRef)
+  useWsTrade(symbol, tf, candleRef, volumeRef, destroyedRef)
+
+  const badge = exchangeBadge(coin?.exchange || '')
+  const vol = coin ? formatCompact(coin.quoteVolume24h) : '-'
 
   return (
-    <div className="flex flex-col h-full bg-[#0f0f0f] border border-[#1e1e1e] overflow-hidden">
-      <div className="flex items-center justify-between px-2 py-[3px] bg-[#1a1a1a] border-b border-[#242424] flex-shrink-0">
-        <span className="font-bold text-[11px] text-[#f2f2f2]">{symbol.replace('USDT', '/USDT')}</span>
-        <span className={`font-mono text-[10px] ${isUp ? 'text-[#4bd24b]' : 'text-[#d24b4b]'}`}>{coin ? `$${formatPrice(coin.price)}` : ''}</span>
-        <div className="flex gap-[2px]">
-          {TIMEFRAMES.map(t => (
-            <button key={t} className={`px-[4px] py-[1px] text-[9px] rounded-sm ${tf === t ? 'bg-[#6f4db3] text-white' : 'bg-[#242424] text-[#555] hover:text-[#888]'}`} onClick={() => setTf(t)}>{t}</button>
-          ))}
+    <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
+      {/* Водяной знак */}
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
+        <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'Inter', sans-serif" }}>
+          {symbol.replace('USDT', '')}
+        </span>
+      </div>
+
+      {/* Шапка */}
+      <div className={`relative z-20 flex items-center justify-between px-[6px] py-[3px] border-b border-[#1f1f1f] flex-shrink-0 gap-2 transition-colors duration-300 ${
+        flash === 'green' ? 'bg-[#26a65b]/20' : flash === 'red' ? 'bg-[#e74c3c]/20' : 'bg-[#141414]'
+      }`}>
+        <div className="flex items-center gap-[5px] min-w-0">
+          <span className="text-[9px] font-bold px-[3px] py-[1px] rounded-[2px] leading-none bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/30">
+            {badge}
+          </span>
+          <span className="font-bold text-[11px] text-[#e0e0e0] truncate" style={{ fontFamily: "'Inter', sans-serif" }}>
+            {symbol.replace('USDT', '/USDT')}
+          </span>
+        </div>
+        <div className="flex items-center gap-[6px] flex-shrink-0">
+          {coin && (
+            <>
+              <span className={`font-mono font-bold text-[10px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+                {isUp ? '+' : ''}{coin.change24h.toFixed(1)}%
+              </span>
+              <span className="font-mono text-[10px] text-[#888]">{coin.natr5m ? coin.natr5m.toFixed(1) : '-'}</span>
+              <span className="font-mono text-[10px] text-[#888]">{coin.range1m ? coin.range1m.toFixed(1) : '-'}</span>
+              <span className="font-mono text-[10px] text-[#888]">{vol}</span>
+            </>
+          )}
         </div>
       </div>
-      <div ref={containerRef} className="flex-1 min-h-0" />
+
+      <div ref={containerRef} className="relative z-0 flex-1 min-h-0" />
     </div>
   )
 })
@@ -158,7 +315,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const [tf, setTf] = useState<Timeframe>('1m')
+  const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const coin = useCoinListStore(s => s.sortedCoins.find(c => c.symbol === symbol))
   const isUp = coin ? coin.change24h >= 0 : true
@@ -168,20 +325,27 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     if (!containerRef.current) return
 
     const chart = createChart(containerRef.current, {
-      layout: { background: { type: ColorType.Solid, color: '#0f0f0f' }, textColor: '#b3b3b3', fontSize: 11 },
+      layout: { background: { type: ColorType.Solid, color: '#0e0e0e' }, textColor: '#b3b3b3', fontSize: 11, fontFamily: "'Inter', sans-serif" },
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' }, horzLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' } },
-      rightPriceScale: { borderColor: '#242424', scaleMargins: { top: 0.05, bottom: 0.15 } },
-      timeScale: { borderColor: '#242424', timeVisible: true, visible: true },
+      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.05, bottom: 0.15 }, textColor: '#666666' },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, textColor: '#666666', barSpacing: 6 },
+      handleScroll: true,
+      handleScale: {
+        axisPressedMouseMove: { time: true, price: true },
+        pinch: true,
+        mouseWheel: true,
+      },
+      kineticScroll: { touch: false, mouse: false },
     })
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#4bd24b', downColor: '#d24b4b',
-      borderUpColor: '#4bd24b', borderDownColor: '#d24b4b',
-      wickUpColor: '#4bd24b', wickDownColor: '#d24b4b',
+      upColor: UP_COLOR, downColor: DOWN_COLOR,
+      borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
+      wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 } })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
     candleRef.current = candleSeries
@@ -194,24 +358,86 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     })
     ro.observe(containerRef.current)
 
-    return () => { destroyedRef.current = true; ro.disconnect(); chart.remove(); chartRef.current = null; candleRef.current = null; volumeRef.current = null }
+    // Ctrl + wheel changes bar spacing (candle width)
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        const ts = chart.timeScale()
+        const options = ts.options()
+        const currentSpacing = (options as any).barSpacing || 6
+        const delta = e.deltaY > 0 ? -0.5 : 0.5
+        const newSpacing = Math.max(1, Math.min(30, currentSpacing + delta))
+        ts.applyOptions({ barSpacing: newSpacing })
+      }
+    }
+    containerRef.current.addEventListener('wheel', onWheel, { passive: false })
+
+    return () => {
+      destroyedRef.current = true
+      containerRef.current?.removeEventListener('wheel', onWheel)
+      ro.disconnect()
+      chart.remove()
+      chartRef.current = null
+      candleRef.current = null
+      volumeRef.current = null
+    }
   }, [symbol, tf])
 
   useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 500)
   useWsCandle(symbol, tf, candleRef, volumeRef, destroyedRef)
+  useWsTrade(symbol, tf, candleRef, volumeRef, destroyedRef)
+
+  const badge = exchangeBadge(coin?.exchange || '')
+  const volDisplay = coin
+    ? coin.quoteVolume24h > 1e9
+      ? `${(coin.quoteVolume24h / 1e9).toFixed(1)}B`
+      : coin.quoteVolume24h > 1e6
+        ? `${(coin.quoteVolume24h / 1e6).toFixed(0)}M`
+        : `${(coin.quoteVolume24h / 1e3).toFixed(0)}K`
+    : '-'
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-[#0f0f0f]">
-      <div className="flex items-center gap-3 px-3 py-2 bg-[#1a1a1a] border-b border-[#242424] flex-shrink-0">
-        <button className="text-[#555] hover:text-[#999] transition-colors" onClick={onBack} title="Назад">
-          <ArrowLeft size={16} />
+    <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
+      <div className="flex items-center gap-3 px-3 py-[6px] bg-[#141414] border-b border-[#1f1f1f] flex-shrink-0">
+        <button
+          className="flex items-center justify-center w-[28px] h-[28px] rounded-[4px] bg-[#1a1a1a] border border-[#2a2a2a] text-[#666] hover:bg-[#222] hover:text-[#ccc] hover:border-[#444] transition-all duration-150"
+          onClick={onBack}
+          title="Назад к сетке"
+        >
+          <ArrowLeft size={15} />
         </button>
-        <span className="font-bold text-[14px] text-[#f2f2f2]">{symbol.replace('USDT', '/USDT')}</span>
-        <span className={`font-mono font-bold text-[13px] ${isUp ? 'text-[#4bd24b]' : 'text-[#d24b4b]'}`}>{coin ? `$${formatPrice(coin.price)}` : ''}</span>
-        <div className="flex gap-1 ml-auto">
-          {EXPANDED_TIMEFRAMES.map(t => (
-            <button key={t} className={`px-2 py-[2px] text-[11px] rounded-sm ${tf === t ? 'bg-[#6f4db3] text-white' : 'bg-[#242424] text-[#555] hover:text-[#888]'}`} onClick={() => setTf(t)}>{t}</button>
-          ))}
+
+        <div className="flex items-center gap-[8px] min-w-0">
+          <span className="text-[10px] font-bold px-[4px] py-[1px] rounded-[3px] leading-none bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/30">
+            {badge}
+          </span>
+          <span className="font-bold text-[14px] text-[#f0f0f0] tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>
+            {symbol.replace('USDT', '/USDT')}
+          </span>
+        </div>
+
+        <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+        <div className="flex items-center gap-[6px]">
+          <span className={`font-mono font-bold text-[13px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+            {coin ? `${isUp ? '+' : ''}${coin.change24h.toFixed(2)}%` : ''}
+          </span>
+        </div>
+
+        <span className="font-mono font-bold text-[13px] text-[#e0e0e0]">{coin ? `$${formatPrice(coin.price)}` : ''}</span>
+
+        <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+        <div className="flex items-center gap-[6px] text-[11px] text-[#888]">
+          <span>H: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.high24h)}` : '-'}</span></span>
+          <span>L: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.low24h)}` : '-'}</span></span>
+        </div>
+
+        <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+        <div className="flex items-center gap-[4px] text-[11px] text-[#888]">
+          <span>Vol: <span className="font-mono text-[#b3b3b3]">${volDisplay}</span></span>
         </div>
       </div>
       <div ref={containerRef} className="flex-1 min-h-0" />
@@ -230,21 +456,25 @@ export function ChartGrid() {
 
   if (topSymbols.length === 0) {
     return (
-      <div className="flex-1 h-full p-[2px] grid grid-cols-3 grid-rows-3 gap-[1px] bg-[#0a0a0b]">
-        {Array.from({ length: 9 }).map((_, i) => (
-          <div key={i} className="flex items-center justify-center bg-[#0f0f0f] border border-[#1e1e1e] text-[#333] text-[11px]">
-            Loading...
-          </div>
-        ))}
+      <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
+        <div className="flex-1 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
+          {Array.from({ length: 9 }).map((_, i) => (
+            <div key={i} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
+              Loading...
+            </div>
+          ))}
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="flex-1 h-full p-[2px] grid grid-cols-3 grid-rows-3 gap-[1px] bg-[#0a0a0b]">
-      {topSymbols.map(symbol => (
-        <MiniChart key={symbol} symbol={symbol} />
-      ))}
+    <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
+      <div className="flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
+        {topSymbols.map(symbol => (
+          <MiniChart key={symbol} symbol={symbol} />
+        ))}
+      </div>
     </div>
   )
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useCoinListStore } from '../../store'
-import { wsOnMessage, wsSubscribe } from '../../services/ws'
+import { wsOnMessage } from '../../services/ws'
 import type { DensityCell, UnifiedDepth } from '../../types.js'
 
 function getMarketCapTier(quoteVolume: number): 'large' | 'medium' | 'small' {
@@ -13,9 +13,32 @@ function getDistancePct(price: number, level: number): number {
   return Math.abs((level - price) / price) * 100
 }
 
+function exchangeLabel(ex: string): string {
+  if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
+  if (ex.includes('binance') && ex.includes('spot')) return 'BI-S'
+  if (ex.includes('bybit')) return 'BY-F'
+  if (ex.includes('okx') && ex.includes('futures')) return 'OK-F'
+  if (ex.includes('okx') && ex.includes('spot')) return 'OK-S'
+  return 'EX'
+}
+
+function formatVol(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`
+  if (n >= 1e6) return `${(n / 1e6).toFixed(0)}M`
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`
+  return String(Math.round(n))
+}
+
+const TIER_STYLES: Record<string, { bg: string; border: string; text: string }> = {
+  large: { bg: 'bg-[#26a65b]/12', border: 'border-[#26a65b]/25', text: 'text-[#26a65b]' },
+  medium: { bg: 'bg-[#3b82f6]/12', border: 'border-[#3b82f6]/25', text: 'text-[#3b82f6]' },
+  small: { bg: 'bg-[#555]/8', border: 'border-[#555]/25', text: 'text-[#888]' },
+}
+
 export function DensityMap() {
   const { coins, selectCoin } = useCoinListStore()
   const [cells, setCells] = useState<DensityCell[]>([])
+  const [thresholdPct, setThresholdPct] = useState<1 | 2>(1)
 
   useEffect(() => {
     const unsub = wsOnMessage((msg) => {
@@ -24,7 +47,7 @@ export function DensityMap() {
         const ticker = coins.find(c => c.symbol === depth.symbol)
         if (!ticker) return
 
-        const threshold = ticker.quoteVolume24h * 0.0005
+        const threshold = ticker.quoteVolume24h * (thresholdPct * 0.001)
         const newCells: DensityCell[] = []
 
         for (const [price, qty] of depth.bids) {
@@ -63,66 +86,60 @@ export function DensityMap() {
     })
 
     return unsub
-  }, [coins])
+  }, [coins, thresholdPct])
 
-  const tiers: ('large' | 'medium' | 'small')[] = ['large', 'medium', 'small']
-  const zones = ['0-1%', '1-2%', '>2%']
-
-  const tierLabel: Record<string, string> = { large: 'Large', medium: 'Mid', small: 'Small' }
+  const sorted = cells.sort((a, b) => b.volume - a.volume).slice(0, 50)
 
   return (
-    <div className="flex flex-col h-full bg-[var(--bg-block)]">
-      <div className="px-2 py-1.5 bg-[var(--bg-head)] border-b border-[var(--border)]">
-        <span className="text-xs font-bold text-[var(--fg)]">Density Map</span>
+    <div className="flex flex-col h-full bg-[#0a0a0a]">
+      {/* Threshold toggles */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-[#1f1f1f]">
+        <span className="text-[10px] text-[#555] uppercase tracking-wider">Порог</span>
+        <div className="flex items-center gap-[2px]">
+          {[1, 2].map(pct => (
+            <button
+              key={pct}
+              className={`
+                h-[22px] px-2 text-[10px] font-mono font-medium rounded-[3px] border transition-all cursor-pointer
+                ${thresholdPct === pct
+                  ? 'bg-white text-black border-white'
+                  : 'bg-transparent text-[#666] border-[#2a2a2a] hover:border-[#444]'
+                }
+              `}
+              onClick={() => setThresholdPct(pct as 1 | 2)}
+            >
+              {pct}%
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="flex-1 overflow-y-auto p-1">
-        <table className="w-full text-[10px]">
-          <thead>
-            <tr className="text-[var(--fg-50)]">
-              <th className="text-left py-0.5 px-1"></th>
-              {zones.map(z => <th key={z} className="text-center py-0.5 px-1">{z}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {tiers.map(tier => (
-              <tr key={tier}>
-                <td className="py-0.5 px-1 text-[var(--fg-50)] font-medium">{tierLabel[tier]}</td>
-                {zones.map((_, zi) => {
-                  const distMin = zi === 0 ? 0 : zi === 1 ? 1 : 2
-                  const distMax = zi === 2 ? 100 : zi + 1
-                  const zoneCells = cells
-                    .filter(c => c.marketCap === tier && c.distancePct >= distMin && c.distancePct < distMax)
-                    .sort((a, b) => b.volume - a.volume)
-                    .slice(0, 3)
 
-                  return (
-                    <td key={zi} className="py-0.5 px-0.5 align-top">
-                      {zoneCells.map(cell => {
-                        const bg = cell.side === 'ask'
-                          ? `rgba(212, 75, 75, ${Math.min(0.8, cell.volume / 1e8 + 0.15)})`
-                          : `rgba(75, 210, 75, ${Math.min(0.8, cell.volume / 1e8 + 0.15)})`
-                        return (
-                          <div
-                            key={`${cell.symbol}-${cell.price}-${cell.side}`}
-                            className="px-1 py-0.5 rounded-sm mb-0.5 cursor-pointer hover:opacity-80"
-                            style={{ background: bg }}
-                            onClick={() => selectCoin(cell.symbol)}
-                            title={`${cell.symbol} ${cell.side.toUpperCase()} $${cell.volume.toFixed(0)} @ ${cell.price.toFixed(2)}`}
-                          >
-                            <span className="font-bold text-white">{cell.symbol.replace('USDT', '')}</span>
-                            <span className="text-white/70 ml-1">${cell.volume > 1e6 ? `${(cell.volume / 1e6).toFixed(0)}M` : `${(cell.volume / 1e3).toFixed(0)}K`}</span>
-                          </div>
-                        )
-                      })}
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {cells.length === 0 && (
-          <div className="text-center py-4 text-[var(--fg-25)] text-xs">Loading density data...</div>
+      {/* Legend */}
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[#1f1f1f]">
+        <span className="text-[9px] px-1.5 py-0.5 rounded border border-[#26a65b]/30 bg-[#26a65b]/10 text-[#26a65b]">Большие</span>
+        <span className="text-[9px] px-1.5 py-0.5 rounded border border-[#3b82f6]/30 bg-[#3b82f6]/10 text-[#3b82f6]">Средние</span>
+        <span className="text-[9px] px-1.5 py-0.5 rounded border border-[#555]/30 bg-[#555]/10 text-[#888]">Малые</span>
+      </div>
+
+      {/* List */}
+      <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
+        {sorted.map(cell => {
+          const style = TIER_STYLES[cell.marketCap] || TIER_STYLES.small
+          return (
+            <div
+              key={`${cell.symbol}-${cell.price}-${cell.side}`}
+              className={`flex items-center justify-between px-2.5 py-1.5 rounded-[6px] border cursor-pointer hover:brightness-110 transition-all ${style.bg} ${style.border}`}
+              onClick={() => selectCoin(cell.symbol)}
+              title={`${cell.symbol} ${cell.side.toUpperCase()} $${formatVol(cell.volume)} @ ${cell.price.toFixed(4)} (${cell.distancePct.toFixed(2)}%)`}
+            >
+              <span className="text-[9px] text-[#555] font-mono">{exchangeLabel(cell.exchange)}</span>
+              <span className="font-bold text-[11px] text-[#e5e5e5]">{cell.symbol.replace('USDT', '')}</span>
+              <span className="font-mono text-[10px] text-[#888]">${formatVol(cell.volume)}</span>
+            </div>
+          )
+        })}
+        {sorted.length === 0 && (
+          <div className="text-center py-8 text-[#333] text-[11px]">Ожидание данных плотности...</div>
         )}
       </div>
     </div>

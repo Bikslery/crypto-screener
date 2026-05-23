@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { UnifiedTicker, Timeframe, ChartBlock, Exchange } from '../types.js'
+import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, FilterExchange } from '../types.js'
 import { wsOnMessage, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 
 const EXCHANGE_PRIORITY: Record<Exchange, number> = {
@@ -45,16 +45,26 @@ interface CoinListStore {
   sortDir: 'asc' | 'desc'
   selectedSymbol: string | null
   expandedSymbol: string | null
+  activeTimeframe: Timeframe
+  filterExchange: FilterExchange
   setSort: (col: keyof UnifiedTicker) => void
   selectCoin: (symbol: string) => void
   expandChart: (symbol: string | null) => void
+  setTimeframe: (tf: Timeframe) => void
+  setFilterExchange: (fe: FilterExchange) => void
   init: () => () => void
 }
 
 let prevTopSymbols: string[] = []
 
-function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc' }) {
-  const sorted = sortCoins(state.coins, state.sortBy, state.sortDir)
+function filterByExchange(coins: UnifiedTicker[], fe: FilterExchange): UnifiedTicker[] {
+  if (fe === 'all') return coins
+  return coins.filter(c => c.exchange.includes(fe))
+}
+
+function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; filterExchange: FilterExchange }) {
+  const filtered = filterByExchange(state.coins, state.filterExchange)
+  const sorted = sortCoins(filtered, state.sortBy, state.sortDir)
   const newTop = sorted.slice(0, 9).map(c => c.symbol)
   const topChartSymbols = sameTop9(newTop, prevTopSymbols) ? prevTopSymbols : (prevTopSymbols = newTop)
   return { sortedCoins: sorted, topChartSymbols }
@@ -68,6 +78,8 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   sortDir: 'desc',
   selectedSymbol: null,
   expandedSymbol: null,
+  activeTimeframe: '5m',
+  filterExchange: 'all',
 
   setSort: (col) => {
     const s = get()
@@ -80,12 +92,55 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
   expandChart: (symbol) => set({ expandedSymbol: symbol, selectedSymbol: symbol }),
 
+  setTimeframe: (tf) => set({ activeTimeframe: tf }),
+
+  setFilterExchange: (fe) => {
+    const s = get()
+    set({ filterExchange: fe, ...recompute({ ...s, filterExchange: fe }) })
+  },
+
   init: () => {
+    let lastSortUpdate = 0
+    const SORT_INTERVAL = 3000
+
     const unsub = wsOnMessage((msg) => {
       if (msg.type === 'ticker' && Array.isArray(msg.data)) {
         const s = get()
         const coins = msg.data as UnifiedTicker[]
-        set({ coins, ...recompute({ ...s, coins }) })
+        const now = Date.now()
+        if (now - lastSortUpdate > SORT_INTERVAL) {
+          lastSortUpdate = now
+          set({ coins, ...recompute({ ...s, coins }) })
+        } else {
+          // Update prices without re-sorting
+          const currentCoins = s.coins.map(c => {
+            const updated = coins.find(nc => nc.symbol === c.symbol)
+            return updated || c
+          })
+          set({ coins: currentCoins, sortedCoins: s.sortedCoins.map(c => {
+            const updated = coins.find(nc => nc.symbol === c.symbol)
+            return updated || c
+          }) })
+        }
+      } else if (msg.type && (msg.type as string).startsWith('trade:')) {
+        // Real-time trade update
+        const trade = msg.data as any
+        if (trade && trade.symbol && trade.price) {
+          const s = get()
+          const updatedCoins = s.coins.map(c => {
+            if (c.symbol === trade.symbol) {
+              return { ...c, price: trade.price }
+            }
+            return c
+          })
+          const updatedSorted = s.sortedCoins.map(c => {
+            if (c.symbol === trade.symbol) {
+              return { ...c, price: trade.price }
+            }
+            return c
+          })
+          set({ coins: updatedCoins, sortedCoins: updatedSorted })
+        }
       }
     })
     wsSubscribe('ticker')
@@ -201,4 +256,18 @@ export const useAuthStore = create<AuthStore>((set) => ({
     localStorage.removeItem('email')
     set({ token: null, email: null, isLoggedIn: false })
   },
+}))
+
+interface UIStore {
+  showLogin: boolean
+  showProfile: boolean
+  setShowLogin: (v: boolean) => void
+  setShowProfile: (v: boolean) => void
+}
+
+export const useUIStore = create<UIStore>((set) => ({
+  showLogin: false,
+  showProfile: false,
+  setShowLogin: (v) => set({ showLogin: v }),
+  setShowProfile: (v) => set({ showProfile: v }),
 }))

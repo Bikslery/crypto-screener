@@ -10,6 +10,29 @@ interface Client {
 
 const clients = new Map<WebSocket, Client>()
 
+let candleManager: {
+  subscribeCandle: (symbol: string, tf: string) => void
+  unsubscribeCandle: (symbol: string, tf: string) => void
+  subscribeDepth: (symbol: string) => void
+  unsubscribeDepth: (symbol: string) => void
+} | null = null
+
+export function setCandleManager(cm: typeof candleManager) {
+  candleManager = cm
+}
+
+function parseCandleChannel(channel: string): { symbol: string; tf: string } | null {
+  const match = channel.match(/^candle:([^:]+):(.+)$/)
+  if (!match) return null
+  return { symbol: match[1], tf: match[2] }
+}
+
+function parseDepthChannel(channel: string): string | null {
+  const match = channel.match(/^depth:(.+)$/)
+  if (!match) return null
+  return match[1]
+}
+
 export function setupWsHub(wss: WebSocketServer) {
   wss.on('connection', (ws, req) => {
     let user: JwtPayload | null = null
@@ -28,13 +51,42 @@ export function setupWsHub(wss: WebSocketServer) {
         const msg = JSON.parse(raw.toString()) as WsMessage
         if (msg.type === 'subscribe' && msg.channel) {
           client.subscriptions.add(msg.channel)
+
+          const candleInfo = parseCandleChannel(msg.channel)
+          if (candleInfo && candleManager) {
+            candleManager.subscribeCandle(candleInfo.symbol, candleInfo.tf)
+          }
+
+          const depthSymbol = parseDepthChannel(msg.channel)
+          if (depthSymbol && candleManager) {
+            candleManager.subscribeDepth(depthSymbol)
+          }
         } else if (msg.type === 'unsubscribe' && msg.channel) {
           client.subscriptions.delete(msg.channel)
+
+          const candleInfo = parseCandleChannel(msg.channel)
+          if (candleInfo && candleManager) {
+            candleManager.unsubscribeCandle(candleInfo.symbol, candleInfo.tf)
+          }
+
+          const depthSymbol = parseDepthChannel(msg.channel)
+          if (depthSymbol && candleManager) {
+            candleManager.unsubscribeDepth(depthSymbol)
+          }
         }
       } catch {}
     })
 
     ws.on('close', () => {
+      // Unsubscribe from all channels on disconnect
+      if (candleManager) {
+        for (const channel of client.subscriptions) {
+          const candleInfo = parseCandleChannel(channel)
+          if (candleInfo) candleManager.unsubscribeCandle(candleInfo.symbol, candleInfo.tf)
+          const depthSymbol = parseDepthChannel(channel)
+          if (depthSymbol) candleManager.unsubscribeDepth(depthSymbol)
+        }
+      }
       clients.delete(ws)
     })
   })

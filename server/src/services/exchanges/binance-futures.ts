@@ -3,7 +3,7 @@ import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } f
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 
 const TF_MAP: Record<string, string> = {
-  '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h',
+  '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
 
 export class BinanceFuturesAdapter implements ExchangeAdapter {
@@ -19,6 +19,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
   private pollTimer: ReturnType<typeof setInterval> | null = null
+  private reconnectCandleTimer: ReturnType<typeof setTimeout> | null = null
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
@@ -73,18 +74,54 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     this.reconnectCandles()
   }
 
+  unsubscribeCandle(symbol: string, tf: string) {
+    const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
+    this.candleSubs.delete(stream)
+    this.reconnectCandles()
+  }
+
   subscribeDepth(symbol: string, cb: DepthCallback) {
     const stream = `${symbol.toLowerCase()}@depth20@100ms`
     this.depthSubs.set(stream, cb)
     this.reconnectDepth()
   }
 
+  unsubscribeDepth(symbol: string) {
+    const stream = `${symbol.toLowerCase()}@depth20@100ms`
+    this.depthSubs.delete(stream)
+    this.reconnectDepth()
+  }
+
   private reconnectCandles() {
-    if (this.candleSubs.size === 0) return
-    this.candleWs?.close()
+    if (this.reconnectCandleTimer) {
+      clearTimeout(this.reconnectCandleTimer)
+    }
+    this.reconnectCandleTimer = setTimeout(() => {
+      this.reconnectCandleTimer = null
+      this.doReconnectCandles()
+    }, 300)
+  }
+
+  private doReconnectCandles() {
+    if (this.candleSubs.size === 0) {
+      if (this.candleWs) {
+        try { this.candleWs.close() } catch {}
+        this.candleWs = null
+      }
+      return
+    }
+    if (this.candleWs && this.candleWs.readyState !== WebSocket.CONNECTING) {
+      try { this.candleWs.close() } catch {}
+    }
     const streams = Array.from(this.candleSubs.keys()).join('/')
-    const url = `wss://fstream.binance.com/ws/${streams}`
+    const url = `wss://fstream.binance.com/stream?streams=${streams}`
+    console.log(`[Binance Futures] Candle WS connecting: ${url}`)
     this.candleWs = new WebSocket(url)
+
+    this.candleWs.on('open', () => {
+      console.log(`[Binance Futures] Candle WS connected (${this.candleSubs.size} streams)`)
+    })
+
     this.candleWs.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString())
@@ -94,15 +131,34 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
           const subCb = this.candleSubs.get(msg.stream)
           if (subCb) subCb(candle)
         }
-      } catch {}
+      } catch (e) {
+        console.error('[Binance Futures] Candle parse error:', e)
+      }
+    })
+
+    this.candleWs.on('error', (err) => {
+      console.error(`[Binance Futures] Candle WS error:`, err.message || err)
+    })
+
+    this.candleWs.on('close', () => {
+      console.log(`[Binance Futures] Candle WS closed, reconnecting in 3s...`)
+      setTimeout(() => this.doReconnectCandles(), 3000)
     })
   }
 
   private reconnectDepth() {
-    if (this.depthSubs.size === 0) return
-    this.depthWs?.close()
+    if (this.depthSubs.size === 0) {
+      if (this.depthWs) {
+        try { this.depthWs.close() } catch {}
+        this.depthWs = null
+      }
+      return
+    }
+    if (this.depthWs && this.depthWs.readyState !== WebSocket.CONNECTING) {
+      try { this.depthWs.close() } catch {}
+    }
     const streams = Array.from(this.depthSubs.keys()).join('/')
-    const url = `wss://fstream.binance.com/ws/${streams}`
+    const url = `wss://fstream.binance.com/stream?streams=${streams}`
     this.depthWs = new WebSocket(url)
     this.depthWs.on('message', (raw) => {
       try {

@@ -57,4 +57,19 @@ router.get('/me', authMiddleware, async (req, res) => {
   }
 })
 
+router.get('/telegram-link', authMiddleware, async (req, res) => {
+  const { userId } = (req as any).user
+  const link = `https://t.me/ScalpBoardBot?start=bind_${userId}`
+  res.json({ link })
+})
+
+router.post('/telegram-unbind', authMiddleware, async (req, res) => {
+  const { userId } = (req as any).user
+  await prisma.user.update({
+    where: { id: userId },
+    data: { telegramChatId: null },
+  })
+  res.json({ ok: true })
+})
+
 export default router

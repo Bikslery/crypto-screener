@@ -9,6 +9,10 @@ export interface ExchangeAdapter {
   onTicker(cb: (t: UnifiedTicker) => void): void
   onCandle(cb: (c: UnifiedCandle) => void): void
   onDepth(cb: (d: UnifiedDepth) => void): void
+  subscribeCandle(symbol: string, tf: string, cb: CandleCallback): void
+  unsubscribeCandle(symbol: string, tf: string): void
+  subscribeDepth(symbol: string, cb: DepthCallback): void
+  unsubscribeDepth(symbol: string): void
   fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]>
   fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth>
 }
