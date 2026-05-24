@@ -11,3 +11,6 @@ server/prisma/dev.db-journal
 .DS_Store
 *.db
 *.db-journal
+*.png
+*.err
+TZ/
