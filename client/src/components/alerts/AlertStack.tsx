@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useAlertStore, useAuthStore } from '../../store'
 import api from '../../services/api'
 import { formatPrice, extractBaseAsset } from '../../utils/format'
@@ -106,12 +106,12 @@ export function AlertStack() {
   const coins = useCoinListStore(s => s.coins)
   const [showForm, setShowForm] = useState(false)
 
-  const grouped = alerts.reduce((acc: any, alert: any) => {
+  const grouped = useMemo(() => alerts.reduce((acc: any, alert: any) => {
     const type = alert.type || 'price'
     if (!acc[type]) acc[type] = []
     acc[type].push(alert)
     return acc
-  }, {})
+  }, {}), [alerts])
 
   return (
     <div className="flex flex-col h-full bg-[#0a0a0a]">

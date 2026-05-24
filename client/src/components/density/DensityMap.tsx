@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, useMemo } from 'react'
 import { useCoinListStore } from '../../store'
 import { wsOnMessage } from '../../services/ws'
 import type { DensityCell, UnifiedDepth } from '../../types.js'
@@ -30,7 +30,10 @@ const TIER_STYLES: Record<string, { bg: string; border: string; text: string }> 
 }
 
 export function DensityMap() {
-  const { coins, selectCoin } = useCoinListStore()
+  const selectCoin = useCoinListStore(s => s.selectCoin)
+  const coins = useCoinListStore(s => s.coins)
+  const coinsRef = useRef(coins)
+  coinsRef.current = coins
   const [cells, setCells] = useState<DensityCell[]>([])
   const [thresholdPct, setThresholdPct] = useState<1 | 2>(1)
 
@@ -38,7 +41,7 @@ export function DensityMap() {
     const unsub = wsOnMessage((msg) => {
       if (msg.type === 'depth' && msg.data) {
         const depth = msg.data as UnifiedDepth
-        const ticker = coins.find(c => c.symbol === depth.symbol)
+        const ticker = coinsRef.current.find(c => c.symbol === depth.symbol)
         if (!ticker) return
 
         const threshold = ticker.quoteVolume24h * (thresholdPct * 0.001)
@@ -82,9 +85,9 @@ export function DensityMap() {
     })
 
     return unsub
-  }, [coins, thresholdPct])
+  }, [thresholdPct])
 
-  const sorted = cells.sort((a, b) => b.volume - a.volume).slice(0, 50)
+  const sorted = useMemo(() => [...cells].sort((a, b) => b.volume - a.volume).slice(0, 50), [cells])
 
   return (
     <div className="flex flex-col h-full bg-[#0a0a0a]">

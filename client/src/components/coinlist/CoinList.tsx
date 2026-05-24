@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useCoinListStore } from '../../store'
 import type { UnifiedTicker } from '../../types'
 import { formatCompact, extractBaseAsset } from '../../utils/format'
@@ -40,11 +41,19 @@ function formatVal(key: ColKey, coin: UnifiedTicker): string {
 }
 
 export function CoinList() {
-  const { sortedCoins, sortBy, sortDir, selectedSymbol, setSort, expandChart, filterExchange } = useCoinListStore()
+  const sortedCoins = useCoinListStore(s => s.sortedCoins)
+  const sortBy = useCoinListStore(s => s.sortBy)
+  const sortDir = useCoinListStore(s => s.sortDir)
+  const selectedSymbol = useCoinListStore(s => s.selectedSymbol)
+  const setSort = useCoinListStore(s => s.setSort)
+  const expandChart = useCoinListStore(s => s.expandChart)
+  const filterExchange = useCoinListStore(s => s.filterExchange)
 
-  const filtered = filterExchange === 'all'
-    ? sortedCoins
-    : sortedCoins.filter(c => c.exchange.includes(filterExchange))
+  const filtered = useMemo(() =>
+    filterExchange === 'all'
+      ? sortedCoins
+      : sortedCoins.filter(c => c.exchange.includes(filterExchange))
+  , [sortedCoins, filterExchange])
 
   return (
     <div className="w-[400px] h-full flex flex-col bg-[#0a0a0a]">

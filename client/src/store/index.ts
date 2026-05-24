@@ -113,33 +113,19 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
           set({ coins, ...recompute({ ...s, coins }) })
         } else {
           // Update prices without re-sorting
-          const currentCoins = s.coins.map(c => {
-            const updated = coins.find(nc => nc.symbol === c.symbol)
-            return updated || c
-          })
-          set({ coins: currentCoins, sortedCoins: s.sortedCoins.map(c => {
-            const updated = coins.find(nc => nc.symbol === c.symbol)
-            return updated || c
-          }) })
+          const updateMap = new Map<string, UnifiedTicker>(coins.map(c => [c.symbol, c]))
+          const currentCoins = s.coins.map(c => updateMap.get(c.symbol) || c)
+          set({ coins: currentCoins, sortedCoins: s.sortedCoins.map(c => updateMap.get(c.symbol) || c) })
         }
       } else if (msg.type && (msg.type as string).startsWith('trade:')) {
         // Real-time trade update
         const trade = msg.data as any
         if (trade && trade.symbol && trade.price) {
           const s = get()
-          const updatedCoins = s.coins.map(c => {
-            if (c.symbol === trade.symbol) {
-              return { ...c, price: trade.price }
-            }
-            return c
-          })
-          const updatedSorted = s.sortedCoins.map(c => {
-            if (c.symbol === trade.symbol) {
-              return { ...c, price: trade.price }
-            }
-            return c
-          })
-          set({ coins: updatedCoins, sortedCoins: updatedSorted })
+          const sym = trade.symbol as string
+          const price = trade.price as number
+          const updater = (c: UnifiedTicker) => c.symbol === sym ? { ...c, price } : c
+          set({ coins: s.coins.map(updater), sortedCoins: s.sortedCoins.map(updater) })
         }
       }
     })

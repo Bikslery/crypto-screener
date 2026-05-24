@@ -1,7 +1,8 @@
-import { useEffect, useRef, memo, useState } from 'react'
+import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore } from '../../store'
+import { useShallow } from 'zustand/shallow'
 import { wsOnMessage, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import api from '../../services/api'
 import type { Timeframe, UnifiedCandle } from '../../types'
@@ -179,7 +180,11 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
-  const coin = useCoinListStore(s => s.sortedCoins.find(c => c.symbol === symbol))
+  const coin = useCoinListStore(useShallow(s => {
+    const c = s.sortedCoins.find(c => c.symbol === symbol)
+    if (!c) return null
+    return { exchange: c.exchange, change24h: c.change24h, price: c.price, quoteVolume24h: c.quoteVolume24h, pricePrecision: c.pricePrecision, natr5m: c.natr5m, range1m: c.range1m }
+  }))
   const isUp = coin ? coin.change24h >= 0 : true
   const [flash, setFlash] = useState<'green' | 'red' | null>(null)
   const prevPriceRef = useRef<number | null>(null)
@@ -346,7 +351,11 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
-  const coin = useCoinListStore(s => s.sortedCoins.find(c => c.symbol === symbol))
+  const coin = useCoinListStore(useShallow(s => {
+    const c = s.sortedCoins.find(c => c.symbol === symbol)
+    if (!c) return null
+    return { exchange: c.exchange, change24h: c.change24h, price: c.price, quoteVolume24h: c.quoteVolume24h, pricePrecision: c.pricePrecision, high24h: c.high24h, low24h: c.low24h }
+  }))
   const isUp = coin ? coin.change24h >= 0 : true
   const [selection, setSelection] = useState<RangeSelection | null>(null)
 
@@ -480,7 +489,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
 
     const onMouseDown = (e: MouseEvent) => {
-      if (e.button !== 0 || !e.shiftKey) return
+      if (!(e.button === 0 && e.shiftKey) && e.button !== 1) return
       const rect = container.getBoundingClientRect()
       startX = e.clientX - rect.left
       startY = e.clientY - rect.top
@@ -525,13 +534,17 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       }
     }
 
+    const onAuxclick = (e: MouseEvent) => { if (e.button === 1) e.preventDefault() }
+
     container.addEventListener('mousedown', onMouseDown, true)
+    container.addEventListener('auxclick', onAuxclick)
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
     window.addEventListener('keydown', onKeyDown)
 
     return () => {
       container.removeEventListener('mousedown', onMouseDown, true)
+      container.removeEventListener('auxclick', onAuxclick)
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
       window.removeEventListener('keydown', onKeyDown)
@@ -587,7 +600,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
         </div>
 
         <div className="ml-auto text-[10px] text-[#666] font-mono">
-          Shift + ЛКМ — измерить %
+          Shift + ЛКМ / Колёсико — измерить %
         </div>
       </div>
       <div ref={containerRef} className="relative flex-1 min-h-0">
@@ -655,6 +668,23 @@ export function ChartGrid() {
   const topSymbols = useCoinListStore(s => s.topChartSymbols)
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
+  const [visibleCount, setVisibleCount] = useState(0)
+  const staggeredRef = useRef(false)
+
+  useEffect(() => {
+    if (topSymbols.length === 0) return
+    if (staggeredRef.current) {
+      setVisibleCount(topSymbols.length)
+      return
+    }
+    staggeredRef.current = true
+    setVisibleCount(0)
+    const timers: ReturnType<typeof setTimeout>[] = []
+    for (let i = 0; i < topSymbols.length; i++) {
+      timers.push(setTimeout(() => setVisibleCount(i + 1), i * 80))
+    }
+    return () => timers.forEach(clearTimeout)
+  }, [topSymbols])
 
   if (expandedSymbol) {
     return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} />
@@ -677,8 +707,13 @@ export function ChartGrid() {
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
-        {topSymbols.map(symbol => (
+        {topSymbols.slice(0, visibleCount).map(symbol => (
           <MiniChart key={symbol} symbol={symbol} />
+        ))}
+        {Array.from({ length: Math.max(0, 9 - visibleCount) }).map((_, i) => (
+          <div key={`placeholder-${i}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
+            Loading...
+          </div>
         ))}
       </div>
     </div>
