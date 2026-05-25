@@ -61,13 +61,11 @@ export function startAggregator() {
       }
     })
 
-    adapter.onCandle((candle) => {
-      broadcast({ type: 'candle', channel: `candle:${candle.symbol}:${candle.timeframe}`, data: candle })
-    })
-
-    adapter.onDepth((depth) => {
-      broadcast({ type: 'depth', channel: `depth:${depth.symbol}`, data: depth })
-    })
+    // NOTE: onCandle / onDepth callbacks are NOT wired here — the
+    // CandleManager handles per-client subscriptions and broadcasts via
+    // broadcastToChannel().  Wiring them here too would send every candle
+    // update TWICE (once via broadcast() and once via the manager),
+    // doubling WS traffic and client-side processing.
 
     console.log(`[Aggregator] Starting adapter: ${adapter.name} (${adapter.exchange})`)
     adapter.connect()
