@@ -186,15 +186,44 @@ export async function fetchCandlesRange(symbol: string, tf: string, fromMs: numb
   return []
 }
 
-export async function fetchListingTime(symbol: string, _exchange?: Exchange): Promise<number> {
+export async function fetchListingTime(symbol: string, exchange?: Exchange): Promise<number> {
+  // Пробуем указанную биржу, потом лучшую, потом все остальные
+  const tryOrder: Exchange[] = []
+  if (exchange) tryOrder.push(exchange)
   const bestEx = getBestExchange(symbol)
-  const adapter = adapters.find(a => a.exchange === bestEx)
-  if (!adapter) return 0
-  try {
-    return await adapter.fetchListingTime(symbol)
-  } catch {
-    return 0
+  if (!tryOrder.includes(bestEx)) tryOrder.push(bestEx)
+  for (const a of adapters) {
+    if (!tryOrder.includes(a.exchange)) tryOrder.push(a.exchange)
   }
+
+  for (const ex of tryOrder) {
+    const adapter = adapters.find(a => a.exchange === ex)
+    if (!adapter) continue
+    try {
+      const t = await adapter.fetchListingTime(symbol)
+      if (t > 0) return t
+    } catch {}
+  }
+  return 0
+}
+
+export async function fetchAllCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number, onProgress?: (loaded: number) => void): Promise<UnifiedCandle[]> {
+  const bestEx = await resolveExchange(symbol)
+  const adapter = adapters.find(a => a.exchange === bestEx)
+  if (!adapter) return []
+
+  try {
+    const result = await adapter.fetchAllCandlesRange(symbol, tf, fromMs, toMs, onProgress)
+    if (result.length > 0) return result
+  } catch {}
+
+  const fallback = adapters.find(a => a.exchange !== bestEx)
+  if (fallback) {
+    try {
+      return await fallback.fetchAllCandlesRange(symbol, tf, fromMs, toMs, onProgress)
+    } catch {}
+  }
+  return []
 }
 
 export function getAdapter(exchange: Exchange): ExchangeAdapter | undefined {

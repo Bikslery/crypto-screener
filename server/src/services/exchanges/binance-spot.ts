@@ -8,6 +8,11 @@ const TF_MAP: Record<string, string> = {
   '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
 
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+  '1h': 3600, '2h': 7200, '4h': 14400, '1d': 86400, '1w': 604800,
+}
+
 export class BinanceSpotAdapter implements ExchangeAdapter {
   name = 'Binance'
   type: 'spot' | 'futures' = 'spot'
@@ -294,12 +299,60 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     }))
   }
 
+  /**
+   * fetchAllCandlesRange — пагинация REST API для загрузки ВСЕЙ истории.
+   * Запрашивает батчами по 1000 свечей, сдвигая окно по времени.
+   * Rate limit: 100ms между запросами, exponential backoff на 429.
+   */
+  async fetchAllCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number, onProgress?: (loaded: number) => void): Promise<UnifiedCandle[]> {
+    const tfMs = (TF_SECONDS[tf] || 60) * 1000
+    const batchSize = 1000
+    let allCandles: UnifiedCandle[] = []
+    let cursorMs = fromMs
+    let consecutiveErrors = 0
+
+    while (cursorMs < toMs) {
+      const batchEndMs = Math.min(cursorMs + tfMs * batchSize, toMs)
+      const batch = await this.fetchCandlesRange(symbol, tf, cursorMs, batchEndMs)
+
+      if (batch.length === 0) {
+        // Пустой батч — возможно данных нет в этом окне
+        cursorMs = batchEndMs + 1
+        consecutiveErrors++
+        if (consecutiveErrors > 5) break
+        await new Promise(r => setTimeout(r, 100))
+        continue
+      }
+
+      consecutiveErrors = 0
+      allCandles = allCandles.concat(batch)
+
+      if (onProgress) onProgress(allCandles.length)
+
+      // Сдвигаем курсор к последней полученной свече + 1 tf
+      const lastTime = batch[batch.length - 1].time
+      cursorMs = (lastTime + (TF_SECONDS[tf] || 60)) * 1000
+
+      // Rate limit
+      await new Promise(r => setTimeout(r, 100))
+    }
+
+    return allCandles
+  }
+
   async fetchListingTime(symbol: string): Promise<number> {
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&startTime=0&limit=1`
-    const res = await fetch(url)
-    const data = await res.json()
-    if (!Array.isArray(data) || data.length === 0) return 0
-    return Math.floor((data[0][0] as number) / 1000)
+    // Пробуем startTime=1 (epoch 1сек) — Binance может не принимать startTime=0
+    for (const startMs of [1, 0]) {
+      try {
+        const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&startTime=${startMs}&limit=1`
+        const res = await fetch(url)
+        const data = await res.json()
+        if (Array.isArray(data) && data.length > 0) {
+          return Math.floor((data[0][0] as number) / 1000)
+        }
+      } catch {}
+    }
+    return 0
   }
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {

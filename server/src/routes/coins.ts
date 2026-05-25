@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { getTickers, getTicker, fetchCandles, fetchDepth, fetchListingTime, getAdapter, adapters } from '../services/aggregator/index.js'
+import { getTickers, getTicker, fetchCandles, fetchDepth, fetchListingTime, fetchAllCandlesRange, getAdapter, adapters } from '../services/aggregator/index.js'
 import { getCandlesFromDb, startBackfill, isBackfillRunning } from '../services/candles/backfill.js'
 import { getCachedCandles, setCachedCandles, prependCachedCandles, setCachedCandlesFromRest, isRestCached } from '../services/candles/cache.js'
 import { getBestExchange, resolveExchange } from '../services/aggregator/exchange-resolver.js'
@@ -21,14 +21,14 @@ router.get('/', (_req, res) => {
 /**
  * GET /:symbol/candles
  *
- * Полная переработка: REST — источник истины для последних свечей.
- *
- * Раньше: DB > REST (DB перезаписывала REST при мерже).
- * Проблема: DB содержит гэпы от старых backfill-багов, и эти гэпы
- * затирали корректные REST-данные.
- *
- * Теперь: REST > DB — REST данные всегда приоритетнее для недавних свечей.
- * DB данные используются только для исторических свечей (старше REST-окна).
+ * Параметры:
+ *   tf       — таймфрейм (1m, 5m, 15m, 1h, 4h, 1d...)
+ *   limit    — кол-во свечей (для не-full режима)
+ *   full=1   — загрузить максимум свечей (REST + DB)
+ *   history=1 — загрузить ВСЮ историю с момента листинга (пагинация REST API)
+ *   from_time — UNIX timestamp начала (для DB запросов)
+ *   to_time   — UNIX timestamp конца
+ *   exchange  — конкретная биржа
  */
 router.get('/:symbol/candles', async (req, res) => {
   const { symbol } = req.params
@@ -36,9 +36,52 @@ router.get('/:symbol/candles', async (req, res) => {
   const limit = parseInt(req.query.limit as string) || 500
   const exchange = req.query.exchange as string | undefined
   const full = req.query.full === '1'
+  const history = req.query.history === '1'
   const fromTime = req.query.from_time ? parseInt(req.query.from_time as string) : undefined
   const toTime = req.query.to_time ? parseInt(req.query.to_time as string) : undefined
 
+  // === history=1: полная история с момента листинга через пагинацию REST ===
+  if (history) {
+    const listingTime = await fetchListingTime(symbol)
+    let startMs = (fromTime || listingTime || 0) * 1000
+    const endMs = (toTime || Math.floor(Date.now() / 1000)) * 1000
+
+    if (startMs <= 0) {
+      // Не удалось определить listing time — fallback на обычный REST
+      const candles = await fetchCandles(symbol, tf, 1500, exchange as any)
+      res.json(candles)
+      return
+    }
+
+    // Для мелких TF ограничиваем глубину — 5m за 9 лет = ~812K свечей (>100MB JSON)
+    // Максимум: 1d/1w = полная, 1h/2h/4h = 2 года, 5m/15m/30m = 6 месяцев, 1m/3m = 1 месяц
+    const tfSec: Record<string, number> = {
+      '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+      '1h': 3600, '2h': 7200, '4h': 14400, '1d': 86400, '1w': 604800,
+    }
+    const maxDepthSec: Record<string, number> = {
+      '1m': 30 * 86400, '3m': 90 * 86400, '5m': 180 * 86400, '15m': 365 * 86400,
+      '30m': 365 * 86400, '1h': 2 * 365 * 86400, '2h': 2 * 365 * 86400,
+      '4h': 2 * 365 * 86400, '1d': 10 * 365 * 86400, '1w': 10 * 365 * 86400,
+    }
+    const depthSec = maxDepthSec[tf] || 365 * 86400
+    const maxStartMs = endMs - depthSec * 1000
+    if (startMs < maxStartMs) startMs = maxStartMs
+
+    try {
+      const allCandles = await fetchAllCandlesRange(symbol, tf, startMs, endMs, (loaded) => {
+        // Прогресс можно логировать, но не отсылаем частично — ждём всё
+      })
+      res.json(allCandles)
+    } catch (err: any) {
+      console.error(`[History] Error fetching all candles for ${symbol}/${tf}:`, err.message)
+      const fallback = await fetchCandles(symbol, tf, 1500, exchange as any)
+      res.json(fallback)
+    }
+    return
+  }
+
+  // === full=1: максимум свечей (DB + последние REST) ===
   if (full) {
     // 1. Проверяем кэш — но ТОЛЬКО если он заполнен из REST (не из backfill/DB)
     if (isRestCached(symbol, tf)) {
@@ -52,8 +95,15 @@ router.get('/:symbol/candles', async (req, res) => {
     // 2. Резолвим лучший exchange
     const bestEx = await resolveExchange(symbol)
 
-    // 3. Запрашиваем REST НАПРЯМУЮ у адаптера (в обход кэша агрегатора!)
-    //    Это гарантирует чистые данные от Binance API без гэпов.
+    // 3. Сначала пробуем DB — там может быть полная история от backfill
+    let dbCandles = await getCandlesFromDb(symbol, tf, bestEx, fromTime, toTime)
+
+    if (dbCandles.length === 0) {
+      const altEx: Exchange = bestEx === 'binance-futures' ? 'binance-spot' : 'binance-futures'
+      dbCandles = await getCandlesFromDb(symbol, tf, altEx, fromTime, toTime)
+    }
+
+    // 4. Получаем свежие REST свечи (последние 1500)
     const adapter = adapters.find(a => a.exchange === bestEx)
     let restCandles: any[] = []
 
@@ -63,7 +113,6 @@ router.get('/:symbol/candles', async (req, res) => {
       } catch {}
     }
 
-    // Fallback на другой адаптер если основной вернул пусто
     if (restCandles.length === 0) {
       const fallback = adapters.find(a => a.exchange !== bestEx)
       if (fallback) {
@@ -74,61 +123,34 @@ router.get('/:symbol/candles', async (req, res) => {
     }
 
     if (restCandles.length > 0) {
-      // Сохраняем REST в кэш (помечаем как REST-источник)
       setCachedCandlesFromRest(symbol, tf, restCandles)
+    }
 
-      // 4. Пробуем добавить DB данные ТОЛЬКО если они примыкают к REST
-      //    (нет разрыва больше 2 свечей). Иначе DB данные создают гэп
-      //    в середине графика, что хуже чем просто REST-окно.
-      const earliestRestTime = restCandles[0].time
-      const tfSec = TF_SECONDS_MAP[tf] || 300
-      let dbCandles = await getCandlesFromDb(symbol, tf, bestEx, undefined, earliestRestTime - 1)
+    // 5. Мержим DB + REST (REST приоритет — затирает DB свечи на тех же таймстемпах)
+    if (dbCandles.length > 0 && restCandles.length > 0) {
+      const candleMap = new Map<number, any>()
+      // Сначала DB (старые данные)
+      for (const c of dbCandles) candleMap.set(c.time, c)
+      // Потом REST поверх (свежие данные побеждают)
+      for (const c of restCandles) candleMap.set(c.time, c)
+      const merged = Array.from(candleMap.values()).sort((a: any, b: any) => a.time - b.time)
+      // НЕ обновляем кэш из DB-мёржа — кэш должен быть чистым REST
+      res.json(merged)
+      return
+    }
 
-      if (dbCandles.length === 0) {
-        const altEx: Exchange = bestEx === 'binance-futures' ? 'binance-spot' : 'binance-futures'
-        dbCandles = await getCandlesFromDb(symbol, tf, altEx, undefined, earliestRestTime - 1)
-      }
+    if (dbCandles.length > 0) {
+      res.json(dbCandles)
+      return
+    }
 
-      if (dbCandles.length > 0) {
-        // Берём только DB свечи, которые ДО REST-окна
-        const dbBefore = dbCandles.filter(c => c.time < earliestRestTime)
-
-        // Проверяем: последний DB candle должен быть рядом с первым REST candle
-        if (dbBefore.length > 0) {
-          const lastDbTime = dbBefore[dbBefore.length - 1].time
-          const gap = earliestRestTime - lastDbTime
-
-          if (gap <= tfSec * 2) {
-            // DB данные примыкают — мержим
-            const candleMap = new Map<number, any>()
-            for (const c of dbBefore) candleMap.set(c.time, c)
-            for (const c of restCandles) candleMap.set(c.time, c)
-            const merged = Array.from(candleMap.values()).sort((a: any, b: any) => a.time - b.time)
-            // НЕ обновляем кэш из DB-мёржа — кэш должен быть чистым REST
-            res.json(merged)
-            return
-          }
-        }
-      }
-
-      // Нет смежных DB данных — отдаём только REST
+    // Нет DB — отдаём только REST
+    if (restCandles.length > 0) {
       res.json(restCandles)
       return
     }
 
-    // REST вернул пусто — fallback на DB (кэш НЕ обновляем из DB)
-    let targetExchange = exchange || bestEx
-    let dbCandles = await getCandlesFromDb(symbol, tf, targetExchange, fromTime, toTime)
-
-    if (dbCandles.length === 0) {
-      const altEx: Exchange = targetExchange === 'binance-futures' ? 'binance-spot' : 'binance-futures'
-      const altCandles = await getCandlesFromDb(symbol, tf, altEx, fromTime, toTime)
-      if (altCandles.length > 0) {
-        dbCandles = altCandles
-      }
-    }
-
-    res.json(dbCandles.length > 0 ? dbCandles : [])
+    res.json([])
     return
   }
 

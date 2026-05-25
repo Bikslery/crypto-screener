@@ -80,7 +80,7 @@ function useRafFlush(
 // ==================== UNIFIED useCandleData ====================
 // Заменяет: useCandles, useWsCandle, useWsTrade, useBackfill
 // Единая точка входа для всех свечных данных:
-// 1. REST-загрузка (full=1 для полной истории)
+// 1. REST-загрузка (history=1 для полной истории, full=1 для DB+REST)
 // 2. WS kline для live-обновлений
 // 3. WS trade для sub-kline close-обновлений
 // 4. WS backfill прогресс (дозагрузка истории)
@@ -102,6 +102,7 @@ function useCandleData(
   const backfillTriggeredRef = useRef(false)
   const initialEarliestRef = useRef<number | null>(null)
   const lastFilledToRef = useRef<number | null>(null)
+  const historyLoadedRef = useRef(false)
 
   // Helper: apply candles array to chart
   const applyCandles = useCallback((candles: UnifiedCandle[]) => {
@@ -123,7 +124,7 @@ function useCandleData(
     chartRef.current?.timeScale().fitContent()
   }, [])
 
-  // Helper: fetch REST candles
+  // Helper: fetch REST candles (quick load — recent candles only)
   const fetchRestCandles = useCallback(async (limit: number, useFull: boolean) => {
     if (destroyedRef.current) return
     const params: Record<string, string | number> = { tf, limit }
@@ -142,6 +143,29 @@ function useCandleData(
     } catch {}
   }, [symbol, tf, applyCandles])
 
+  // Helper: fetch FULL history candles (from listing to now, paginated REST)
+  const fetchHistoryCandles = useCallback(async () => {
+    if (destroyedRef.current) return
+    try {
+      const res = await api.get(`/coins/${symbol}/candles`, {
+        params: { tf, history: 1 },
+      })
+      if (destroyedRef.current) return
+      const candles = res.data as UnifiedCandle[]
+      if (candles.length > 0) {
+        candlesRef.current = candles
+        lastKlineTimeRef.current = candles[candles.length - 1].time
+        historyLoadedRef.current = true
+        applyCandles(candles)
+        console.log(`[useCandleData] Full history loaded: ${symbol}:${tf} = ${candles.length} candles`)
+      }
+    } catch (err: any) {
+      console.error(`[useCandleData] History fetch failed for ${symbol}:${tf}:`, err?.message)
+      // Fallback на обычный REST
+      fetchRestCandles(1500, true)
+    }
+  }, [symbol, tf, applyCandles, fetchRestCandles])
+
   // 1. Initial REST load
   useEffect(() => {
     candlesRef.current = []
@@ -149,7 +173,17 @@ function useCandleData(
     backfillTriggeredRef.current = false
     initialEarliestRef.current = null
     lastFilledToRef.current = null
-    fetchRestCandles(full ? 1500 : 300, full)
+    historyLoadedRef.current = false
+
+    if (full) {
+      // Сначала быстрая загрузка (DB + последние REST), потом полная история
+      fetchRestCandles(1500, true).then(() => {
+        // После первоначальной отрисовки — грузим полную историю
+        fetchHistoryCandles()
+      })
+    } else {
+      fetchRestCandles(300, false)
+    }
   }, [symbol, tf])
 
   // 2. WS candle subscription (kline data)
@@ -242,12 +276,13 @@ function useCandleData(
       if (!progress || progress.status === 'error') return
 
       if (progress.status === 'completed') {
-        // Full re-fetch after backfill completes
-        fetchRestCandles(1500, true)
+        // Full re-fetch after backfill completes — load entire history
+        fetchHistoryCandles()
         return
       }
 
-      // Incremental fill during backfill
+      // Incremental fill during backfill — SKIP if full history already loaded
+      if (historyLoadedRef.current) return
       if (candlesRef.current.length > 0 && candleRef.current && volumeRef.current) {
         if (initialEarliestRef.current == null) {
           initialEarliestRef.current = candlesRef.current[0]?.time ?? null
@@ -311,7 +346,7 @@ function useCandleData(
       unsub()
       wsUnsubscribe(channel)
     }
-  }, [symbol, tf, full])
+  }, [symbol, tf, full, fetchHistoryCandles])
 
   // 5. Gap-fill: on WS reconnect, fetch recent candles to fill any gap
   useEffect(() => {

@@ -187,6 +187,11 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     return 0
   }
 
+  async fetchAllCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number, _onProgress?: (loaded: number) => void): Promise<UnifiedCandle[]> {
+    // Fallback: single-range fetch (no pagination for Bybit yet)
+    return this.fetchCandlesRange(symbol, tf, fromMs, toMs)
+  }
+
   private scheduleReconnect() {
     if (this.reconnectTimer) return
     if (this.pingTimer) clearInterval(this.pingTimer)

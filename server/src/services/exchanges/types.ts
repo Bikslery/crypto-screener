@@ -15,6 +15,7 @@ export interface ExchangeAdapter {
   unsubscribeDepth(symbol: string): void
   fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]>
   fetchCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number): Promise<UnifiedCandle[]>
+  fetchAllCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number, onProgress?: (loaded: number) => void): Promise<UnifiedCandle[]>
   fetchListingTime(symbol: string): Promise<number>
   fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth>
 }
