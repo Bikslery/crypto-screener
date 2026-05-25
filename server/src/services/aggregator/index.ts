@@ -1,16 +1,14 @@
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import { BinanceSpotAdapter } from '../exchanges/binance-spot.js'
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
-// import { BybitFuturesAdapter } from '../exchanges/bybit-futures.js'
-// import { OkxSpotAdapter } from '../exchanges/okx-spot.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
 import { broadcast } from '../../ws/hub.js'
+import { resolveExchange, getBestExchange } from './exchange-resolver.js'
+import { getCachedCandles, setCachedCandles, updateCachedCandle, prependCachedCandles } from '../candles/cache.js'
 
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
   new BinanceFuturesAdapter(),
-  // new BybitFuturesAdapter(),
-  // new OkxSpotAdapter(),
 ]
 
 const tickerMap = new Map<string, UnifiedTicker>()
@@ -33,7 +31,7 @@ function pickBest(tickers: UnifiedTicker[]): Map<string, UnifiedTicker> {
 }
 
 let lastBroadcast = 0
-const BROADCAST_INTERVAL = 50 // 50ms for near real-time
+const BROADCAST_INTERVAL = 50
 let loggedFirst = false
 let tickerCount = 0
 const metricsMap = new Map<string, { range1m: number; natr5m: number }>()
@@ -55,17 +53,20 @@ export function startAggregator() {
         const arr = Array.from(best.values())
         if (!loggedFirst) {
           loggedFirst = true
-          console.log(`[Aggregator] First broadcast: ${arr.length} coins (received ${tickerCount} ticks), top: ${arr.slice(0, 3).map(t => t.symbol).join(', ')}`)
+          console.log(`[Aggregator] First broadcast: ${arr.length} coins, top: ${arr.slice(0, 3).map(t => t.symbol).join(', ')}`)
+          // Pre-resolve exchanges for top symbols after first broadcast
+          const top200 = arr.sort((a, b) => b.quoteVolume24h - a.quoteVolume24h).slice(0, 200)
+          const symbols = top200.map(t => t.symbol)
+          import('./exchange-resolver.js').then(mod => mod.preResolveExchanges(symbols)).catch(() => {})
         }
         broadcast({ type: 'ticker', data: arr })
       }
     })
 
-    // NOTE: onCandle / onDepth callbacks are NOT wired here — the
-    // CandleManager handles per-client subscriptions and broadcasts via
-    // broadcastToChannel().  Wiring them here too would send every candle
-    // update TWICE (once via broadcast() and once via the manager),
-    // doubling WS traffic and client-side processing.
+    // Candle callback: update cache + broadcast
+    adapter.onCandle((candle) => {
+      updateCachedCandle(candle)
+    })
 
     console.log(`[Aggregator] Starting adapter: ${adapter.name} (${adapter.exchange})`)
     adapter.connect()
@@ -83,7 +84,7 @@ async function computeMetrics() {
 
     for (const coin of topCoins) {
       try {
-        const candles1m = await fetchCandles(coin.symbol, '1m', 5, coin.exchange)
+        const candles1m = await fetchCandles(coin.symbol, '1m', 5)
         if (candles1m.length >= 2) {
           const highs = candles1m.map(c => c.high)
           const lows = candles1m.map(c => c.low)
@@ -93,7 +94,7 @@ async function computeMetrics() {
           metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { natr5m: 0 }), range1m })
         }
 
-        const candles5m = await fetchCandles(coin.symbol, '5m', 14, coin.exchange)
+        const candles5m = await fetchCandles(coin.symbol, '5m', 14)
         if (candles5m.length >= 2) {
           const trs = candles5m.map((c, i) => {
             if (i === 0) return c.high - c.low
@@ -124,33 +125,59 @@ export function getTicker(symbol: string): UnifiedTicker | undefined {
   return best.get(symbol)
 }
 
-export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange): Promise<UnifiedCandle[]> {
-  const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
-  const adapter = adapters.find(a => a.exchange === targetExchange)
+/**
+ * fetchCandles — теперь использует кэш + ExchangeResolver.
+ * 1. Проверяем кэш (мгновенно)
+ * 2. Если кэш пуст — резолвим лучший exchange через ExchangeResolver
+ * 3. Запрашиваем REST у лучшего адаптера с fallback
+ * 4. Сохраняем в кэш
+ */
+export async function fetchCandles(symbol: string, tf: string, limit: number, _exchange?: Exchange): Promise<UnifiedCandle[]> {
+  // 1. Проверяем кэш
+  const cached = getCachedCandles(symbol, tf)
+  if (cached.length >= limit) {
+    return cached.slice(cached.length - limit)
+  }
+
+  // 2. Резолвим лучший exchange для свечей
+  const bestEx = await resolveExchange(symbol)
+  const adapter = adapters.find(a => a.exchange === bestEx)
   if (!adapter) return []
+
   try {
     const result = await adapter.fetchCandles(symbol, tf, limit)
-    if (result.length > 0) return result
+    if (result.length > 0) {
+      setCachedCandles(symbol, tf, result)
+      return result
+    }
   } catch {}
-  // Fallback to another adapter when primary returns empty or errors
-  const fallback = adapters.find(a => a.exchange !== targetExchange)
+
+  // 3. Fallback на другой адаптер
+  const fallback = adapters.find(a => a.exchange !== bestEx)
   if (fallback) {
     try {
-      return await fallback.fetchCandles(symbol, tf, limit)
+      const result = await fallback.fetchCandles(symbol, tf, limit)
+      if (result.length > 0) {
+        setCachedCandles(symbol, tf, result)
+        return result
+      }
     } catch {}
   }
+
   return []
 }
 
-export async function fetchCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number, exchange?: Exchange): Promise<UnifiedCandle[]> {
-  const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
-  const adapter = adapters.find(a => a.exchange === targetExchange)
+export async function fetchCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number, _exchange?: Exchange): Promise<UnifiedCandle[]> {
+  const bestEx = await resolveExchange(symbol)
+  const adapter = adapters.find(a => a.exchange === bestEx)
   if (!adapter) return []
+
   try {
     const result = await adapter.fetchCandlesRange(symbol, tf, fromMs, toMs)
     if (result.length > 0) return result
   } catch {}
-  const fallback = adapters.find(a => a.exchange !== targetExchange)
+
+  const fallback = adapters.find(a => a.exchange !== bestEx)
   if (fallback) {
     try {
       return await fallback.fetchCandlesRange(symbol, tf, fromMs, toMs)
@@ -159,9 +186,9 @@ export async function fetchCandlesRange(symbol: string, tf: string, fromMs: numb
   return []
 }
 
-export async function fetchListingTime(symbol: string, exchange?: Exchange): Promise<number> {
-  const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
-  const adapter = adapters.find(a => a.exchange === targetExchange)
+export async function fetchListingTime(symbol: string, _exchange?: Exchange): Promise<number> {
+  const bestEx = getBestExchange(symbol)
+  const adapter = adapters.find(a => a.exchange === bestEx)
   if (!adapter) return 0
   try {
     return await adapter.fetchListingTime(symbol)
@@ -174,9 +201,9 @@ export function getAdapter(exchange: Exchange): ExchangeAdapter | undefined {
   return adapters.find(a => a.exchange === exchange)
 }
 
-export async function fetchDepth(symbol: string, limit: number, exchange?: Exchange): Promise<UnifiedDepth | null> {
-  const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
-  const adapter = adapters.find(a => a.exchange === targetExchange)
+export async function fetchDepth(symbol: string, limit: number, _exchange?: Exchange): Promise<UnifiedDepth | null> {
+  const bestEx = getBestExchange(symbol)
+  const adapter = adapters.find(a => a.exchange === bestEx)
   if (!adapter) return null
   try {
     return await adapter.fetchDepth(symbol, limit)

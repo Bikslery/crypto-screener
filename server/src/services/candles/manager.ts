@@ -1,11 +1,12 @@
 import type { CandleCallback, ExchangeAdapter } from '../exchanges/types.js'
 import { broadcastToChannel } from '../../ws/hub.js'
-import { getTicker } from '../aggregator/index.js'
 import type { UnifiedCandle } from '../../types.js'
 import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
 import { persistCandle, getCandlesFromDb, startBackfill, isBackfillRunning } from './backfill.js'
+import { updateCachedCandle, getCachedCandles, setCachedCandles } from './cache.js'
+import { getBestExchange, resolveExchange } from '../aggregator/exchange-resolver.js'
+import { adapters } from '../aggregator/index.js'
 
-// Track which exchange adapter is subscribed to which symbol+timeframe
 const activeCandleSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
 const activeDepthSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
 
@@ -17,30 +18,24 @@ function getDepthKey(symbol: string) {
   return symbol
 }
 
-function getBestAdapter(symbol: string, adapters: ExchangeAdapter[]): ExchangeAdapter | null {
-  // Prefer adapter matching the ticker's exchange (fixes WS/DB exchange mismatch)
-  const ticker = getTicker(symbol)
-  if (ticker) {
-    const adapter = adapters.find(a => a.exchange === ticker.exchange)
-    if (adapter) return adapter
-  }
-  // Fallback: spot adapter
-  const spotAdapter = adapters.find(a => a.type === 'spot')
-  if (spotAdapter) return spotAdapter
-  return adapters[0] || null
+/**
+ * Получить лучший адаптер для символа — через ExchangeResolver.
+ * Больше НЕ зависит от тикерного exchange (который был futures без свечей).
+ */
+function getBestAdapter(symbol: string): ExchangeAdapter | null {
+  const ex = getBestExchange(symbol)
+  const adapter = adapters.find(a => a.exchange === ex)
+  if (adapter) return adapter
+  // Fallback: spot
+  const spot = adapters.find(a => a.type === 'spot')
+  return spot || adapters[0] || null
 }
 
-// Timeframe durations in seconds
 const TF_SECONDS: Record<string, number> = {
   '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
   '1h': 3600, '2h': 7200, '4h': 14400, '1d': 86400, '1w': 604800,
 }
 
-/**
- * Check if DB data for a symbol+tf is stale (large gap from last candle to now).
- * Also detects sparse data (large internal gaps despite fresh tail).
- * Triggers auto-backfill in either case.
- */
 async function autoBackfillIfStale(symbol: string, tf: string, adapter: ExchangeAdapter) {
   try {
     if (isBackfillRunning(symbol, tf, adapter.exchange)) return
@@ -50,7 +45,6 @@ async function autoBackfillIfStale(symbol: string, tf: string, adapter: Exchange
     const tfSec = TF_SECONDS[tf] || 60
 
     if (dbCandles.length === 0) {
-      // No data at all — start full backfill
       console.log(`[CandleManager] No DB data for ${symbol}:${tf}, starting backfill via ${adapter.exchange}`)
       startBackfill(symbol, tf, adapter).catch(err => {
         console.error(`[CandleManager] Auto-backfill error for ${symbol}:${tf}:`, err.message)
@@ -61,7 +55,6 @@ async function autoBackfillIfStale(symbol: string, tf: string, adapter: Exchange
     const latestTime = dbCandles[dbCandles.length - 1].time
     const gapCandles = (now - latestTime) / tfSec
 
-    // Check tail gap (last candle → now)
     if (gapCandles > 2) {
       console.log(`[CandleManager] Gap of ${gapCandles.toFixed(0)} candles for ${symbol}:${tf}, starting backfill via ${adapter.exchange}`)
       startBackfill(symbol, tf, adapter).catch(err => {
@@ -70,8 +63,6 @@ async function autoBackfillIfStale(symbol: string, tf: string, adapter: Exchange
       return
     }
 
-    // Check data density: even with a fresh tail, data might be extremely sparse
-    // (e.g., only a few recent WS candles but no historical data)
     const earliestTime = dbCandles[0].time
     const expectedRange = now - earliestTime
     const expectedCandles = Math.floor(expectedRange / tfSec)
@@ -92,9 +83,9 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
   const candleCallback: CandleCallback = (candle: UnifiedCandle) => {
     const channel = `candle:${candle.symbol}:${candle.timeframe}`
     broadcastToChannel(channel, candle)
-    // Persist closed candles to DB
-    // A candle is considered "closed" if it's not the current incomplete one
-    // We persist every update to ensure we have the latest state
+    // Обновляем кэш (мгновенно, in-memory)
+    updateCachedCandle(candle)
+    // Persist в БД (асинхронно, не блокируем)
     persistCandle({
       symbol: candle.symbol,
       exchange: candle.exchange,
@@ -122,18 +113,18 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
         return
       }
 
-      const adapter = getBestAdapter(symbol, adapters)
+      const adapter = getBestAdapter(symbol)
       if (!adapter) {
         console.error(`[CandleManager] No adapter available for ${symbol}`)
         return
       }
 
+      // Инкрементальный SUBSCRIBE — WS уже открыт, отправляем команду
       adapter.subscribeCandle(symbol, tf, candleCallback)
       activeCandleSubs.set(key, { adapter, count: 1 })
       subscribeAggTrade(symbol)
-      console.log(`[CandleManager] Subscribed to ${key} via ${adapter.name}`)
+      console.log(`[CandleManager] Subscribed to ${key} via ${adapter.exchange}`)
 
-      // Auto-backfill: check DB for gaps and start backfill if data is stale
       autoBackfillIfStale(symbol, tf, adapter)
     },
 
@@ -144,6 +135,7 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
 
       existing.count--
       if (existing.count <= 0) {
+        // Инкрементальный UNSUBSCRIBE — WS остаётся открытым
         existing.adapter.unsubscribeCandle(symbol, tf)
         activeCandleSubs.delete(key)
         unsubscribeAggTrade(symbol)
@@ -159,7 +151,7 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
         return
       }
 
-      const adapter = getBestAdapter(symbol, adapters)
+      const adapter = getBestAdapter(symbol)
       if (!adapter) return
 
       adapter.subscribeDepth(symbol, depthCallback)

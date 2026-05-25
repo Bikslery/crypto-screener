@@ -1,4 +1,4 @@
-import { useEffect, useRef, memo, useState } from 'react'
+import { useEffect, useRef, memo, useState, useCallback } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, useLivePrice } from '../../store'
@@ -27,45 +27,8 @@ function exchangeBadge(ex: string): string {
   return 'EX'
 }
 
-function useCandles(symbol: string, tf: Timeframe, candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>, volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>, chartRef: React.RefObject<IChartApi | null>, destroyedRef: React.RefObject<boolean>, limit = 300, candlesDataRef?: React.RefObject<UnifiedCandle[]>, full = false) {
-  useEffect(() => {
-    if (!candleRef.current || !volumeRef.current || destroyedRef.current) return
+// ==================== RAF-throttled flush ====================
 
-    candleRef.current.setData([])
-    volumeRef.current.setData([])
-    if (candlesDataRef) candlesDataRef.current = []
-
-    const params: Record<string, string | number> = { tf, limit }
-    if (full) params.full = 1
-
-    api.get(`/coins/${symbol}/candles`, { params })
-      .then(res => {
-        if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
-        const candles = res.data as UnifiedCandle[]
-        if (candlesDataRef) candlesDataRef.current = candles
-        const candleData = candles.map(c => ({
-          time: c.time as Time,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        }))
-        const volumeData = candles.map(c => ({
-          time: c.time as Time,
-          value: c.volume,
-          color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-        }))
-        candleRef.current.setData(candleData)
-        volumeRef.current.setData(volumeData)
-        chartRef.current?.timeScale().fitContent()
-      })
-      .catch(() => {})
-  }, [symbol, tf])
-}
-
-// RAF-throttled candle/volume updates: only the latest pending payload per frame
-// is flushed to lightweight-charts. Avoids saturating React/main thread when
-// WS bursts at 50–100 msg/s.
 function useRafFlush(
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
@@ -114,28 +77,101 @@ function useRafFlush(
   }
 }
 
-function useWsCandle(
+// ==================== UNIFIED useCandleData ====================
+// Заменяет: useCandles, useWsCandle, useWsTrade, useBackfill
+// Единая точка входа для всех свечных данных:
+// 1. REST-загрузка (full=1 для полной истории)
+// 2. WS kline для live-обновлений
+// 3. WS trade для sub-kline close-обновлений
+// 4. WS backfill прогресс (дозагрузка истории)
+// 5. Gap-fill при WS реконнекте
+
+function useCandleData(
   symbol: string,
   tf: Timeframe,
-  flush: ReturnType<typeof useRafFlush>,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
-  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+  flush: ReturnType<typeof useRafFlush>,
+  full = false,
 ) {
+  const candlesRef = useRef<UnifiedCandle[]>([])
+  const wsConnectedRef = useRef(true) // assume connected initially
+  const lastKlineTimeRef = useRef<number>(0) // для gap-fill при реконнекте
+  const backfillTriggeredRef = useRef(false)
+  const initialEarliestRef = useRef<number | null>(null)
+  const lastFilledToRef = useRef<number | null>(null)
+
+  // Helper: apply candles array to chart
+  const applyCandles = useCallback((candles: UnifiedCandle[]) => {
+    if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
+    const candleData = candles.map(c => ({
+      time: c.time as Time,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }))
+    const volumeData = candles.map(c => ({
+      time: c.time as Time,
+      value: c.volume,
+      color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+    }))
+    candleRef.current.setData(candleData)
+    volumeRef.current.setData(volumeData)
+    chartRef.current?.timeScale().fitContent()
+  }, [])
+
+  // Helper: fetch REST candles
+  const fetchRestCandles = useCallback(async (limit: number, useFull: boolean) => {
+    if (destroyedRef.current) return
+    const params: Record<string, string | number> = { tf, limit }
+    if (useFull) params.full = 1
+    try {
+      const res = await api.get(`/coins/${symbol}/candles`, { params })
+      if (destroyedRef.current) return
+      const candles = res.data as UnifiedCandle[]
+      if (candles.length > 0) {
+        candlesRef.current = candles
+        if (candles.length > 0) {
+          lastKlineTimeRef.current = candles[candles.length - 1].time
+        }
+        applyCandles(candles)
+      }
+    } catch {}
+  }, [symbol, tf, applyCandles])
+
+  // 1. Initial REST load
+  useEffect(() => {
+    candlesRef.current = []
+    lastKlineTimeRef.current = 0
+    backfillTriggeredRef.current = false
+    initialEarliestRef.current = null
+    lastFilledToRef.current = null
+    fetchRestCandles(full ? 1500 : 300, full)
+  }, [symbol, tf])
+
+  // 2. WS candle subscription (kline data)
   useEffect(() => {
     const channel = `candle:${symbol}:${tf}`
+
     const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
       const c = msg.data as UnifiedCandle
       if (!c) return
-      if (candlesDataRef && candlesDataRef.current) {
-        const arr = candlesDataRef.current
-        const last = arr[arr.length - 1]
-        if (last && last.time === c.time) {
-          arr[arr.length - 1] = c
-        } else if (!last || c.time > last.time) {
-          arr.push(c)
-        }
+
+      // Update candlesRef
+      const arr = candlesRef.current
+      const last = arr[arr.length - 1]
+      if (last && last.time === c.time) {
+        arr[arr.length - 1] = c
+      } else if (!last || c.time > last.time) {
+        arr.push(c)
       }
+
+      lastKlineTimeRef.current = c.time
+
       flush.queueCandle({
         time: c.time as Time,
         open: c.open,
@@ -149,25 +185,16 @@ function useWsCandle(
         color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       })
     })
+
     wsSubscribe(channel)
+
     return () => {
       unsub()
       wsUnsubscribe(channel)
     }
   }, [symbol, tf])
-}
 
-function useWsTrade(
-  symbol: string,
-  tf: Timeframe,
-  flush: ReturnType<typeof useRafFlush>,
-  destroyedRef: React.RefObject<boolean>,
-  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
-) {
-  // Track the last known candle time so trades only update the current candle
-  const lastTimeRef = useRef<number>(0)
-  const lastOhlcRef = useRef<{ open: number; high: number; low: number; close: number } | null>(null)
-
+  // 3. WS trade subscription (sub-kline close updates)
   useEffect(() => {
     const tradeType = `trade:${symbol}`
 
@@ -178,54 +205,23 @@ function useWsTrade(
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
 
-      // Only update the LAST (current) candle's close price from trades.
-      // useWsCandle provides authoritative OHLC; trades only add
-      // sub-second close updates between kline WS ticks.
-      if (candlesDataRef && candlesDataRef.current) {
-        const arr = candlesDataRef.current
-        const last = arr[arr.length - 1]
-        if (last) {
-          last.close = price
-          if (price > last.high) last.high = price
-          if (price < last.low) last.low = price
-          flush.queueCandle({
-            time: last.time as Time,
-            open: last.open,
-            high: last.high,
-            low: last.low,
-            close: last.close,
-          })
-        }
-      } else {
-        // Fallback when no candlesDataRef (MiniChart): build a lightweight
-        // current-candle tracker from trades alone. When useWsCandle sends
-        // a real kline update it will overwrite this, which is fine.
-        const now = Math.floor(Date.now() / 1000)
-        const tfSeconds = getTfSeconds(tf)
-        const candleTime = Math.floor(now / tfSeconds) * tfSeconds
-
-        if (lastTimeRef.current !== candleTime) {
-          // New candle period started — seed from first trade
-          lastTimeRef.current = candleTime
-          lastOhlcRef.current = { open: price, high: price, low: price, close: price }
-        } else if (lastOhlcRef.current) {
-          const o = lastOhlcRef.current
-          if (price > o.high) o.high = price
-          if (price < o.low) o.low = price
-          o.close = price
-        }
-
-        if (lastOhlcRef.current) {
-          flush.queueCandle({
-            time: candleTime as Time,
-            open: lastOhlcRef.current.open,
-            high: lastOhlcRef.current.high,
-            low: lastOhlcRef.current.low,
-            close: lastOhlcRef.current.close,
-          })
-        }
+      // Update last candle's close from trades
+      const arr = candlesRef.current
+      const last = arr[arr.length - 1]
+      if (last) {
+        last.close = price
+        if (price > last.high) last.high = price
+        if (price < last.low) last.low = price
+        flush.queueCandle({
+          time: last.time as Time,
+          open: last.open,
+          high: last.high,
+          low: last.low,
+          close: last.close,
+        })
       }
     })
+
     wsSubscribe(tradeType)
 
     return () => {
@@ -233,69 +229,30 @@ function useWsTrade(
       wsUnsubscribe(tradeType)
     }
   }, [symbol, tf])
-}
 
-function useBackfill(
-  symbol: string,
-  tf: Timeframe,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  chartRef: React.RefObject<IChartApi | null>,
-  destroyedRef: React.RefObject<boolean>,
-  candlesDataRef: React.RefObject<UnifiedCandle[]>,
-) {
-  const backfillTriggeredRef = useRef(false)
-  const initialEarliestTimeRef = useRef<number | null>(null)
-  const lastFilledToRef = useRef<number | null>(null)
-
+  // 4. WS backfill progress (only for expanded chart)
   useEffect(() => {
-    backfillTriggeredRef.current = false
-    initialEarliestTimeRef.current = null
-    lastFilledToRef.current = null
-  }, [symbol, tf])
+    if (!full) return // backfill only for full mode (expanded chart)
 
-  useEffect(() => {
     const channel = `backfill:${symbol}:${tf}`
+
     const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
       const progress = msg.data as BackfillProgress
       if (!progress || progress.status === 'error') return
 
       if (progress.status === 'completed') {
-        api.get(`/coins/${symbol}/candles`, {
-          params: { tf, full: 1 },
-        }).then(res => {
-          if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
-          const allCandles = res.data as UnifiedCandle[]
-          if (allCandles.length === 0) return
-
-          candlesDataRef.current = allCandles
-
-          const candleData = allCandles.map(c => ({
-            time: c.time as Time,
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-          }))
-          const volumeData = allCandles.map(c => ({
-            time: c.time as Time,
-            value: c.volume,
-            color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-          }))
-
-          candleRef.current.setData(candleData)
-          volumeRef.current.setData(volumeData)
-          chartRef.current?.timeScale().fitContent()
-        }).catch(() => {})
+        // Full re-fetch after backfill completes
+        fetchRestCandles(1500, true)
         return
       }
 
-      if (candlesDataRef.current.length > 0 && candleRef.current && volumeRef.current) {
-        if (initialEarliestTimeRef.current == null) {
-          initialEarliestTimeRef.current = candlesDataRef.current[0]?.time ?? null
+      // Incremental fill during backfill
+      if (candlesRef.current.length > 0 && candleRef.current && volumeRef.current) {
+        if (initialEarliestRef.current == null) {
+          initialEarliestRef.current = candlesRef.current[0]?.time ?? null
         }
-        const initialEarliest = initialEarliestTimeRef.current
+        const initialEarliest = initialEarliestRef.current
         if (initialEarliest == null) return
 
         if (progress.currentTime > (lastFilledToRef.current ?? 0)) {
@@ -311,26 +268,24 @@ function useBackfill(
               if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
               const newCandles = (res.data as UnifiedCandle[])
                 .filter(c => c.time >= fromTime && c.time < toTime)
-
               lastFilledToRef.current = toTime
 
               if (newCandles.length === 0) return
-
-              const existingSet = new Set(candlesDataRef.current.map(c => c.time))
+              const existingSet = new Set(candlesRef.current.map(c => c.time))
               const trulyNew = newCandles.filter(c => !existingSet.has(c.time))
               if (trulyNew.length === 0) return
 
-              candlesDataRef.current = [...trulyNew, ...candlesDataRef.current]
+              candlesRef.current = [...trulyNew, ...candlesRef.current]
                 .sort((a, b) => a.time - b.time)
 
-              const candleData = candlesDataRef.current.map(c => ({
+              const candleData = candlesRef.current.map(c => ({
                 time: c.time as Time,
                 open: c.open,
                 high: c.high,
                 low: c.low,
                 close: c.close,
               }))
-              const volumeData = candlesDataRef.current.map(c => ({
+              const volumeData = candlesRef.current.map(c => ({
                 time: c.time as Time,
                 value: c.volume,
                 color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
@@ -343,8 +298,10 @@ function useBackfill(
         }
       }
     })
+
     wsSubscribe(channel)
 
+    // Trigger backfill if not already running
     if (!backfillTriggeredRef.current) {
       backfillTriggeredRef.current = true
       api.post(`/coins/${symbol}/backfill`, { tf }).catch(() => {})
@@ -354,10 +311,31 @@ function useBackfill(
       unsub()
       wsUnsubscribe(channel)
     }
-  }, [symbol, tf])
+  }, [symbol, tf, full])
+
+  // 5. Gap-fill: on WS reconnect, fetch recent candles to fill any gap
+  useEffect(() => {
+    const checkGap = () => {
+      if (destroyedRef.current) return
+      const now = Math.floor(Date.now() / 1000)
+      const tfSec = getTfSeconds(tf)
+      const lastTime = lastKlineTimeRef.current
+
+      // If last kline is >3 candles old, we may have a gap
+      if (lastTime > 0 && (now - lastTime) / tfSec > 3) {
+        console.log(`[useCandleData] Gap detected for ${symbol}:${tf}, re-fetching recent candles`)
+        fetchRestCandles(full ? 1500 : 300, full)
+      }
+    }
+
+    // Check every 30 seconds for gaps
+    const interval = setInterval(checkGap, 30000)
+    return () => clearInterval(interval)
+  }, [symbol, tf, full])
 }
 
-// Header is split out so price/flash updates never re-render the chart body.
+// ==================== Headers ====================
+
 const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: string }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
@@ -415,6 +393,8 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
     </div>
   )
 })
+
+// ==================== MiniChart ====================
 
 const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -493,8 +473,6 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
     }
   }, [symbol, tf])
 
-  // Update price format in-place when precision changes — avoids destroying
-  // the entire chart (which would lose historical data and require a re-fetch).
   useEffect(() => {
     if (candleRef.current) {
       candleRef.current.applyOptions({
@@ -508,9 +486,8 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   }, [pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 300)
-  useWsCandle(symbol, tf, flush, destroyedRef)
-  useWsTrade(symbol, tf, flush, destroyedRef)
+  // MiniChart использует full=1 для полной истории свечей (убирает гэпы)
+  useCandleData(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, flush, true)
 
   return (
     <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
@@ -524,6 +501,8 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
     </div>
   )
 })
+
+// ==================== ExpandedChart ====================
 
 type RangeSelection = {
   startX: number
@@ -549,7 +528,6 @@ function formatDuration(sec: number): string {
   return h % 24 ? `${d}d ${h % 24}h` : `${d}d`
 }
 
-// Header is split so live price ticks don't re-render the chart canvas.
 const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
@@ -625,7 +603,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const candlesDataRef = useRef<UnifiedCandle[]>([])
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
@@ -699,8 +676,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
   }, [symbol, tf])
 
-  // Update price format in-place when precision changes — avoids destroying
-  // the entire chart (which would lose historical data and require a re-fetch).
   useEffect(() => {
     if (candleRef.current) {
       candleRef.current.applyOptions({
@@ -714,15 +689,14 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 500, candlesDataRef, true)
-  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
-  useWsTrade(symbol, tf, flush, destroyedRef)
-  useBackfill(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef)
+  // ExpandedChart — полная история + backfill
+  useCandleData(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, flush, true)
 
   useEffect(() => {
     setSelection(null)
   }, [symbol, tf])
 
+  // Shift+click measure tool (unchanged)
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -912,6 +886,8 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     </div>
   )
 }
+
+// ==================== ChartGrid ====================
 
 export function ChartGrid() {
   const topSymbols = useCoinListStore(s => s.topChartSymbols)

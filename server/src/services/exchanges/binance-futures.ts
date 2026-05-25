@@ -4,7 +4,8 @@ import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../..
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 
 const TF_MAP: Record<string, string> = {
-  '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
+  '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+  '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
 
 export class BinanceFuturesAdapter implements ExchangeAdapter {
@@ -20,8 +21,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
   private pollTimer: ReturnType<typeof setInterval> | null = null
-  private reconnectCandleTimer: ReturnType<typeof setTimeout> | null = null
   private precisionMap = new Map<string, number>()
+  private wsConnected = false
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
@@ -92,57 +93,45 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     if (this.pollTimer) clearInterval(this.pollTimer)
   }
 
+  // =================== CANDLE WS — INCREMENTAL SUBSCRIBE ===================
+
   subscribeCandle(symbol: string, tf: string, cb: CandleCallback) {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.set(stream, cb)
-    this.reconnectCandles()
+
+    if (this.candleWs && this.wsConnected) {
+      this.sendWsRequest('SUBSCRIBE', [stream])
+    } else {
+      this.ensureCandleWs()
+    }
   }
 
   unsubscribeCandle(symbol: string, tf: string) {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.delete(stream)
-    this.reconnectCandles()
-  }
 
-  subscribeDepth(symbol: string, cb: DepthCallback) {
-    const stream = `${symbol.toLowerCase()}@depth20@100ms`
-    this.depthSubs.set(stream, cb)
-    this.reconnectDepth()
-  }
-
-  unsubscribeDepth(symbol: string) {
-    const stream = `${symbol.toLowerCase()}@depth20@100ms`
-    this.depthSubs.delete(stream)
-    this.reconnectDepth()
-  }
-
-  private reconnectCandles() {
-    if (this.reconnectCandleTimer) {
-      clearTimeout(this.reconnectCandleTimer)
-    }
-    this.reconnectCandleTimer = setTimeout(() => {
-      this.reconnectCandleTimer = null
-      this.doReconnectCandles()
-    }, 300)
-  }
-
-  private doReconnectCandles() {
-    if (this.candleSubs.size === 0) {
-      if (this.candleWs) {
-        try { this.candleWs.close() } catch {}
+    if (this.candleWs && this.wsConnected) {
+      this.sendWsRequest('UNSUBSCRIBE', [stream])
+      if (this.candleSubs.size === 0) {
+        this.candleWs.close()
         this.candleWs = null
+        this.wsConnected = false
       }
-      return
     }
-    if (this.candleWs && this.candleWs.readyState !== WebSocket.CONNECTING) {
-      try { this.candleWs.close() } catch {}
-    }
+  }
+
+  private ensureCandleWs() {
+    if (this.candleWs && this.wsConnected) return
+    if (this.candleSubs.size === 0) return
+
     const streams = Array.from(this.candleSubs.keys()).join('/')
     const url = `wss://fstream.binance.com/stream?streams=${streams}`
-    console.log(`[Binance Futures] Candle WS connecting: ${url}`)
+    console.log(`[Binance Futures] Candle WS connecting: ${this.candleSubs.size} streams`)
     this.candleWs = new WebSocket(url)
+    this.wsConnected = false
 
     this.candleWs.on('open', () => {
+      this.wsConnected = true
       console.log(`[Binance Futures] Candle WS connected (${this.candleSubs.size} streams)`)
     })
 
@@ -166,19 +155,53 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
 
     this.candleWs.on('close', () => {
       console.log(`[Binance Futures] Candle WS closed, reconnecting in 3s...`)
-      setTimeout(() => this.doReconnectCandles(), 3000)
+      this.wsConnected = false
+      if (this.candleSubs.size > 0) {
+        setTimeout(() => {
+          this.candleWs = null
+          this.wsConnected = false
+          this.ensureCandleWs()
+        }, 3000)
+      }
     })
   }
 
-  private reconnectDepth() {
-    if (this.depthSubs.size === 0) {
-      if (this.depthWs) {
-        try { this.depthWs.close() } catch {}
-        this.depthWs = null
-      }
-      return
+  private sendWsRequest(method: 'SUBSCRIBE' | 'UNSUBSCRIBE', params: string[]) {
+    if (!this.candleWs || !this.wsConnected) return
+    const req = {
+      method,
+      params,
+      id: Date.now(),
     }
-    if (this.depthWs && this.depthWs.readyState !== WebSocket.CONNECTING) {
+    try {
+      this.candleWs.send(JSON.stringify(req))
+    } catch (e) {
+      console.error(`[Binance Futures] WS send error:`, e)
+    }
+  }
+
+  // =================== DEPTH WS ===================
+
+  subscribeDepth(symbol: string, cb: DepthCallback) {
+    const stream = `${symbol.toLowerCase()}@depth20@100ms`
+    this.depthSubs.set(stream, cb)
+    this.ensureDepthWs()
+  }
+
+  unsubscribeDepth(symbol: string) {
+    const stream = `${symbol.toLowerCase()}@depth20@100ms`
+    this.depthSubs.delete(stream)
+    if (this.depthSubs.size === 0 && this.depthWs) {
+      this.depthWs.close()
+      this.depthWs = null
+    } else {
+      this.ensureDepthWs()
+    }
+  }
+
+  private ensureDepthWs() {
+    if (this.depthSubs.size === 0) return
+    if (this.depthWs) {
       try { this.depthWs.close() } catch {}
     }
     const streams = Array.from(this.depthSubs.keys()).join('/')
@@ -194,6 +217,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       } catch {}
     })
   }
+
+  // =================== PARSERS ===================
 
   private parseCandle(msg: any): UnifiedCandle | null {
     const k = msg.k || msg.data?.k
@@ -222,6 +247,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       timestamp: Date.now(),
     }
   }
+
+  // =================== REST API ===================
 
   async fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]> {
     const interval = TF_MAP[tf] || '1m'

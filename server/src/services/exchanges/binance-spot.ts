@@ -4,7 +4,8 @@ import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../..
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 
 const TF_MAP: Record<string, string> = {
-  '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
+  '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+  '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
 
 export class BinanceSpotAdapter implements ExchangeAdapter {
@@ -14,14 +15,14 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
 
   private candleWs: WebSocket | null = null
   private depthWs: WebSocket | null = null
-  private candleSubs = new Map<string, CandleCallback>()
+  private candleSubs = new Map<string, CandleCallback>() // stream → callback
   private depthSubs = new Map<string, DepthCallback>()
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
   private pollTimer: ReturnType<typeof setInterval> | null = null
-  private reconnectCandleTimer: ReturnType<typeof setTimeout> | null = null
   private precisionMap = new Map<string, number>()
+  private wsConnected = false
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
@@ -92,58 +93,51 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     if (this.pollTimer) clearInterval(this.pollTimer)
   }
 
+  // =================== CANDLE WS — INCREMENTAL SUBSCRIBE ===================
+
   subscribeCandle(symbol: string, tf: string, cb: CandleCallback) {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.set(stream, cb)
-    this.reconnectCandles()
+
+    if (this.candleWs && this.wsConnected) {
+      // WS уже открыт — отправляем SUBSCRIBE
+      this.sendWsRequest('SUBSCRIBE', [stream])
+    } else {
+      // WS не открыт — открываем с текущими подписками
+      this.ensureCandleWs()
+    }
   }
 
   unsubscribeCandle(symbol: string, tf: string) {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.delete(stream)
-    this.reconnectCandles()
-  }
 
-  subscribeDepth(symbol: string, cb: DepthCallback) {
-    const stream = `${symbol.toLowerCase()}@depth20@100ms`
-    this.depthSubs.set(stream, cb)
-    this.reconnectDepth()
-  }
-
-  unsubscribeDepth(symbol: string) {
-    const stream = `${symbol.toLowerCase()}@depth20@100ms`
-    this.depthSubs.delete(stream)
-    this.reconnectDepth()
-  }
-
-  private reconnectCandles() {
-    if (this.reconnectCandleTimer) {
-      clearTimeout(this.reconnectCandleTimer)
-    }
-    this.reconnectCandleTimer = setTimeout(() => {
-      this.reconnectCandleTimer = null
-      this.doReconnectCandles()
-    }, 300)
-  }
-
-  private doReconnectCandles() {
-    if (this.candleSubs.size === 0) {
-      if (this.candleWs) {
-        try { this.candleWs.close() } catch {}
+    if (this.candleWs && this.wsConnected) {
+      // WS открыт — отправляем UNSUBSCRIBE
+      this.sendWsRequest('UNSUBSCRIBE', [stream])
+      // Если больше нет подписок — закрываем WS
+      if (this.candleSubs.size === 0) {
+        this.candleWs.close()
         this.candleWs = null
+        this.wsConnected = false
       }
-      return
     }
-    if (this.candleWs && this.candleWs.readyState !== WebSocket.CONNECTING) {
-      try { this.candleWs.close() } catch {}
-    }
+  }
+
+  private ensureCandleWs() {
+    if (this.candleWs && this.wsConnected) return
+
+    if (this.candleSubs.size === 0) return
+
     const streams = Array.from(this.candleSubs.keys()).join('/')
     const url = `wss://stream.binance.com:9443/stream?streams=${streams}`
-    console.log(`[Binance] Candle WS connecting: ${url}`)
+    console.log(`[Binance Spot] Candle WS connecting: ${this.candleSubs.size} streams`)
     this.candleWs = new WebSocket(url)
+    this.wsConnected = false
 
     this.candleWs.on('open', () => {
-      console.log(`[Binance] Candle WS connected (${this.candleSubs.size} streams)`)
+      this.wsConnected = true
+      console.log(`[Binance Spot] Candle WS connected (${this.candleSubs.size} streams)`)
     })
 
     this.candleWs.on('message', (raw) => {
@@ -152,34 +146,68 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
         const candle = this.parseCandle(msg)
         if (candle) {
           for (const cb of this.candleCbs) cb(candle)
-          const streamName = msg.stream || ''
-          const subCb = this.candleSubs.get(streamName)
+          const subCb = this.candleSubs.get(msg.stream)
           if (subCb) subCb(candle)
         }
       } catch (e) {
-        console.error('[Binance] Candle parse error:', e)
+        console.error('[Binance Spot] Candle parse error:', e)
       }
     })
 
     this.candleWs.on('error', (err) => {
-      console.error(`[Binance] Candle WS error:`, err.message || err)
+      console.error(`[Binance Spot] Candle WS error:`, err.message || err)
     })
 
     this.candleWs.on('close', () => {
-      console.log(`[Binance] Candle WS closed, reconnecting in 3s...`)
-      setTimeout(() => this.doReconnectCandles(), 3000)
+      console.log(`[Binance Spot] Candle WS closed, reconnecting in 3s...`)
+      this.wsConnected = false
+      // Реконнект только если есть подписки
+      if (this.candleSubs.size > 0) {
+        setTimeout(() => {
+          this.candleWs = null
+          this.wsConnected = false
+          this.ensureCandleWs()
+        }, 3000)
+      }
     })
   }
 
-  private reconnectDepth() {
-    if (this.depthSubs.size === 0) {
-      if (this.depthWs) {
-        try { this.depthWs.close() } catch {}
-        this.depthWs = null
-      }
-      return
+  private sendWsRequest(method: 'SUBSCRIBE' | 'UNSUBSCRIBE', params: string[]) {
+    if (!this.candleWs || !this.wsConnected) return
+    const req = {
+      method,
+      params,
+      id: Date.now(),
     }
-    if (this.depthWs && this.depthWs.readyState !== WebSocket.CONNECTING) {
+    try {
+      this.candleWs.send(JSON.stringify(req))
+    } catch (e) {
+      console.error(`[Binance Spot] WS send error:`, e)
+    }
+  }
+
+  // =================== DEPTH WS ===================
+
+  subscribeDepth(symbol: string, cb: DepthCallback) {
+    const stream = `${symbol.toLowerCase()}@depth20@100ms`
+    this.depthSubs.set(stream, cb)
+    this.ensureDepthWs()
+  }
+
+  unsubscribeDepth(symbol: string) {
+    const stream = `${symbol.toLowerCase()}@depth20@100ms`
+    this.depthSubs.delete(stream)
+    if (this.depthSubs.size === 0 && this.depthWs) {
+      this.depthWs.close()
+      this.depthWs = null
+    } else {
+      this.ensureDepthWs()
+    }
+  }
+
+  private ensureDepthWs() {
+    if (this.depthSubs.size === 0) return
+    if (this.depthWs) {
       try { this.depthWs.close() } catch {}
     }
     const streams = Array.from(this.depthSubs.keys()).join('/')
@@ -195,6 +223,8 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       } catch {}
     })
   }
+
+  // =================== PARSERS ===================
 
   private parseCandle(msg: any): UnifiedCandle | null {
     const k = msg.k || msg.data?.k
@@ -223,6 +253,8 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       timestamp: Date.now(),
     }
   }
+
+  // =================== REST API ===================
 
   async fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]> {
     const interval = TF_MAP[tf] || '1m'
@@ -263,13 +295,11 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   }
 
   async fetchListingTime(symbol: string): Promise<number> {
-    // Try fetching the earliest candle via offset=0, limit=1, startTime=0
-    // Binance returns the earliest available candle
     const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&startTime=0&limit=1`
     const res = await fetch(url)
     const data = await res.json()
     if (!Array.isArray(data) || data.length === 0) return 0
-    return Math.floor((data[0][0] as number) / 1000) // unix seconds
+    return Math.floor((data[0][0] as number) / 1000)
   }
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
