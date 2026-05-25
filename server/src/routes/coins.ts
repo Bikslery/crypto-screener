@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { getTickers, getTicker, fetchCandles, fetchDepth, fetchListingTime, fetchAllCandlesRange, getAdapter, adapters } from '../services/aggregator/index.js'
-import { getCandlesFromDb, startBackfill, isBackfillRunning } from '../services/candles/backfill.js'
-import { getCachedCandles, setCachedCandles, prependCachedCandles, setCachedCandlesFromRest, isRestCached } from '../services/candles/cache.js'
+import { getCandlesFromDb, getDbCandleCount, startBackfill, isBackfillRunning } from '../services/candles/backfill.js'
+import { getCachedCandles, setCachedCandles, prependCachedCandles, setCachedCandlesFromRest, isRestCached, getCachedCandlesRange, getCachedCandlesOlder } from '../services/candles/cache.js'
 import { getBestExchange, resolveExchange } from '../services/aggregator/exchange-resolver.js'
 import type { Exchange } from '../types.js'
 
@@ -22,13 +22,15 @@ router.get('/', (_req, res) => {
  * GET /:symbol/candles
  *
  * Параметры:
- *   tf       — таймфрейм (1m, 5m, 15m, 1h, 4h, 1d...)
- *   limit    — кол-во свечей (для не-full режима)
- *   full=1   — загрузить максимум свечей (REST + DB)
- *   history=1 — загрузить ВСЮ историю с момента листинга (пагинация REST API)
- *   from_time — UNIX timestamp начала (для DB запросов)
- *   to_time   — UNIX timestamp конца
- *   exchange  — конкретная биржа
+ *   tf         — таймфрейм (1m, 5m, 15m, 1h, 4h, 1d...)
+ *   limit      — кол-во свечей (для не-full режима)
+ *   full=1     — загрузить максимум свечей (DB + последние REST)
+ *   history=1  — загрузить ВСЮ историю с момента листинга (пагинация REST API)
+ *   scroll=1   — подгрузка старых свечей для scroll-подгрузки (из кэша/DB, мгновенно)
+ *   before_time — UNIX timestamp: вернуть свечи старше этого времени (для scroll)
+ *   from_time  — UNIX timestamp начала (для DB запросов)
+ *   to_time    — UNIX timestamp конца
+ *   exchange   — конкретная биржа
  */
 router.get('/:symbol/candles', async (req, res) => {
   const { symbol } = req.params
@@ -37,8 +39,65 @@ router.get('/:symbol/candles', async (req, res) => {
   const exchange = req.query.exchange as string | undefined
   const full = req.query.full === '1'
   const history = req.query.history === '1'
+  const scroll = req.query.scroll === '1'
+  const beforeTime = req.query.before_time ? parseInt(req.query.before_time as string) : undefined
   const fromTime = req.query.from_time ? parseInt(req.query.from_time as string) : undefined
   const toTime = req.query.to_time ? parseInt(req.query.to_time as string) : undefined
+
+  // === scroll=1: подгрузка старых свечей (из кэша или DB, мгновенно) ===
+  if (scroll && beforeTime != null) {
+    const scrollLimit = Math.min(limit || 1000, 5000) // макс 5000 за запрос
+    const bestEx = await resolveExchange(symbol)
+
+    // 1. Пробуем кэш — если есть данные старше beforeTime
+    const cachedOlder = getCachedCandlesOlder(symbol, tf, beforeTime, scrollLimit)
+    if (cachedOlder.length >= scrollLimit) {
+      // В кэше достаточно данных — отдаём мгновенно
+      res.json({ candles: cachedOlder, hasMore: true })
+      return
+    }
+
+    // 2. Пробуем DB
+    let dbCandles = await getCandlesFromDb(symbol, tf, bestEx, undefined, beforeTime, scrollLimit, 'desc')
+
+    if (dbCandles.length === 0) {
+      const altEx: Exchange = bestEx === 'binance-futures' ? 'binance-spot' : 'binance-futures'
+      dbCandles = await getCandlesFromDb(symbol, tf, altEx, undefined, beforeTime, scrollLimit, 'desc')
+    }
+
+    // DB возвращает desc (как нужно клиенту), но свечи из DB — без symbol/timeframe/exchange полей UnifiedCandle
+    // Нужно обогатить
+    const enriched = dbCandles.map(c => ({
+      symbol,
+      timeframe: tf,
+      exchange: bestEx,
+      time: c.time,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume,
+    }))
+
+    // Мержим: кэш + DB (DB приоритет — затирает кэш на тех же таймстемпах)
+    const candleMap = new Map<number, any>()
+    for (const c of cachedOlder) candleMap.set(c.time, c)
+    for (const c of enriched) candleMap.set(c.time, c)
+    const merged = Array.from(candleMap.values())
+      .sort((a, b) => b.time - a.time) // DESC — самые свежие из старых первыми
+      .slice(0, scrollLimit)
+
+    const hasMore = enriched.length >= scrollLimit || cachedOlder.length >= scrollLimit
+
+    // Если получили из DB — обновим кэш (prepend для полноты)
+    if (enriched.length > 0) {
+      const ascCandles = [...enriched].sort((a, b) => a.time - b.time)
+      prependCachedCandles(symbol, tf, ascCandles)
+    }
+
+    res.json({ candles: merged, hasMore })
+    return
+  }
 
   // === history=1: полная история с момента листинга через пагинацию REST ===
   if (history) {
@@ -53,18 +112,19 @@ router.get('/:symbol/candles', async (req, res) => {
       return
     }
 
-    // Для мелких TF ограничиваем глубину — 5m за 9 лет = ~812K свечей (>100MB JSON)
-    // Максимум: 1d/1w = полная, 1h/2h/4h = 2 года, 5m/15m/30m = 6 месяцев, 1m/3m = 1 месяц
+    // Depth limits — ослаблены, т.к. DB теперь хранит полную историю
+    // Старые лимиты (1m=30d, 5m=180d) были для REST-пагинации.
+    // С DB-хранилищем можно отдавать глубже, но мелкие TF всё равно тяжёлые.
     const tfSec: Record<string, number> = {
       '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
       '1h': 3600, '2h': 7200, '4h': 14400, '1d': 86400, '1w': 604800,
     }
     const maxDepthSec: Record<string, number> = {
-      '1m': 30 * 86400, '3m': 90 * 86400, '5m': 180 * 86400, '15m': 365 * 86400,
-      '30m': 365 * 86400, '1h': 2 * 365 * 86400, '2h': 2 * 365 * 86400,
-      '4h': 2 * 365 * 86400, '1d': 10 * 365 * 86400, '1w': 10 * 365 * 86400,
+      '1m': 90 * 86400, '3m': 365 * 86400, '5m': 365 * 86400, '15m': 2 * 365 * 86400,
+      '30m': 2 * 365 * 86400, '1h': 5 * 365 * 86400, '2h': 5 * 365 * 86400,
+      '4h': 5 * 365 * 86400, '1d': 10 * 365 * 86400, '1w': 10 * 365 * 86400,
     }
-    const depthSec = maxDepthSec[tf] || 365 * 86400
+    const depthSec = maxDepthSec[tf] || 2 * 365 * 86400
     const maxStartMs = endMs - depthSec * 1000
     if (startMs < maxStartMs) startMs = maxStartMs
 
@@ -81,21 +141,26 @@ router.get('/:symbol/candles', async (req, res) => {
     return
   }
 
-  // === full=1: максимум свечей (DB + последние REST) ===
+  // === full=1: максимум свечей — из кэша (мгновенно) или DB+REST fallback ===
   if (full) {
-    // 1. Проверяем кэш — но ТОЛЬКО если он заполнен из REST (не из backfill/DB)
-    if (isRestCached(symbol, tf)) {
-      const cached = getCachedCandles(symbol, tf)
-      if (cached.length >= 500) {
-        res.json(cached)
+    // 1. Проверяем кэш напрямую —preload заполняет его из DB/REST, оба источника надёжны
+    const cached = getCachedCandles(symbol, tf)
+    if (cached.length >= 100) {
+      // Если есть from_time/to_time — фильтруем из кэша
+      if (fromTime || toTime) {
+        const rangeCandles = getCachedCandlesRange(symbol, tf, fromTime, toTime)
+        res.json(rangeCandles)
         return
       }
+      // Отдаём последние `limit` свечей (не весь кэш — может быть огромным)
+      const result = cached.length > limit ? cached.slice(cached.length - limit) : cached
+      res.json(result)
+      return
     }
 
-    // 2. Резолвим лучший exchange
+    // 2. Кэш пуст/мало — fallback на DB + REST (медленный путь)
     const bestEx = await resolveExchange(symbol)
 
-    // 3. Сначала пробуем DB — там может быть полная история от backfill
     let dbCandles = await getCandlesFromDb(symbol, tf, bestEx, fromTime, toTime)
 
     if (dbCandles.length === 0) {
@@ -103,7 +168,6 @@ router.get('/:symbol/candles', async (req, res) => {
       dbCandles = await getCandlesFromDb(symbol, tf, altEx, fromTime, toTime)
     }
 
-    // 4. Получаем свежие REST свечи (последние 1500)
     const adapter = adapters.find(a => a.exchange === bestEx)
     let restCandles: any[] = []
 
@@ -126,15 +190,12 @@ router.get('/:symbol/candles', async (req, res) => {
       setCachedCandlesFromRest(symbol, tf, restCandles)
     }
 
-    // 5. Мержим DB + REST (REST приоритет — затирает DB свечи на тех же таймстемпах)
+    // Мержим DB + REST (REST приоритет — затирает DB свечи на тех же таймстемпах)
     if (dbCandles.length > 0 && restCandles.length > 0) {
       const candleMap = new Map<number, any>()
-      // Сначала DB (старые данные)
       for (const c of dbCandles) candleMap.set(c.time, c)
-      // Потом REST поверх (свежие данные побеждают)
       for (const c of restCandles) candleMap.set(c.time, c)
       const merged = Array.from(candleMap.values()).sort((a: any, b: any) => a.time - b.time)
-      // НЕ обновляем кэш из DB-мёржа — кэш должен быть чистым REST
       res.json(merged)
       return
     }
@@ -144,7 +205,6 @@ router.get('/:symbol/candles', async (req, res) => {
       return
     }
 
-    // Нет DB — отдаём только REST
     if (restCandles.length > 0) {
       res.json(restCandles)
       return

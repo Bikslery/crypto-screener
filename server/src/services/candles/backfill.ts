@@ -321,6 +321,8 @@ export async function getCandlesFromDb(
   exchange: string,
   fromTime?: number,
   toTime?: number,
+  limit?: number,
+  order: 'asc' | 'desc' = 'asc',
 ): Promise<any[]> {
   const where: any = { symbol, timeframe: tf, exchange }
   if (fromTime) where.time = { ...where.time, gte: fromTime }
@@ -328,7 +330,19 @@ export async function getCandlesFromDb(
 
   return prisma.candle.findMany({
     where,
-    orderBy: { time: 'asc' },
+    orderBy: { time: order },
+    ...(limit ? { take: limit } : {}),
+  })
+}
+
+/** Получить кол-во свечей в DB для символа/TF/exchange */
+export async function getDbCandleCount(
+  symbol: string,
+  tf: string,
+  exchange: string,
+): Promise<number> {
+  return prisma.candle.count({
+    where: { symbol, timeframe: tf, exchange },
   })
 }
 
