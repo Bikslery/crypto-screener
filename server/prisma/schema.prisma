@@ -66,3 +66,26 @@ model KnownSymbol {
   @@unique([symbol, exchange])
   @@index([symbol])
 }
+
+model Candle {
+  symbol    String
+  exchange  String
+  timeframe String
+  time      Int
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    Float
+
+  @@unique([symbol, exchange, timeframe, time])
+  @@index([symbol, timeframe, time])
+}
+
+model SymbolListing {
+  symbol    String
+  exchange  String
+  listedAt  Int
+
+  @@unique([symbol, exchange])
+}

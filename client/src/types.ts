@@ -112,7 +112,7 @@ export type Timeframe = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' 
 export type FilterExchange = 'all' | 'binance' | 'bybit' | 'okx'
 
 export interface WsMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'alert' | 'listing'
+  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'alert' | 'listing' | 'backfill'
   channel?: string
   data?: unknown
 }
@@ -134,4 +134,17 @@ export interface DensityCell {
   distancePct: number
   marketCap: 'large' | 'medium' | 'small'
   pricePrecision: number
+}
+
+export interface BackfillProgress {
+  symbol: string
+  tf: string
+  exchange: Exchange
+  fromTime: number
+  toTime: number
+  currentTime: number
+  percent: number
+  status: 'running' | 'completed' | 'error'
+  error?: string
+  candlesSaved: number
 }

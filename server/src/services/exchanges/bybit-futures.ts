@@ -97,7 +97,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
       symbol: c.symbol || '',
       exchange: this.exchange,
       timeframe: '', // extracted from topic
-      time: c.start / 1000,
+      time: Math.floor(c.start / 1000),
       open: parseFloat(c.open),
       high: parseFloat(c.high),
       low: parseFloat(c.low),
@@ -152,13 +152,13 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
       symbol,
       exchange: this.exchange,
       timeframe: tf,
-      time: k[0] / 1000,
+      time: Math.floor(k[0] / 1000),
       open: parseFloat(k[1]),
       high: parseFloat(k[2]),
       low: parseFloat(k[3]),
       close: parseFloat(k[4]),
       volume: parseFloat(k[5]),
-    }))
+    })).reverse()
   }
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
@@ -175,6 +175,16 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
       asks: json.result.asks.map((a: any[]) => [parseFloat(String(a[0])), parseFloat(String(a[1]))]),
       timestamp: Date.now(),
     }
+  }
+
+  async fetchCandlesRange(_symbol: string, _tf: string, _fromMs: number, _toMs: number): Promise<UnifiedCandle[]> {
+    // TODO: implement Bybit range fetch
+    return []
+  }
+
+  async fetchListingTime(_symbol: string): Promise<number> {
+    // TODO: implement Bybit listing time fetch
+    return 0
   }
 
   private scheduleReconnect() {

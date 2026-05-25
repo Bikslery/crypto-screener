@@ -27,6 +27,12 @@ function parseCandleChannel(channel: string): { symbol: string; tf: string } | n
   return { symbol: match[1], tf: match[2] }
 }
 
+function parseBackfillChannel(channel: string): { symbol: string; tf: string } | null {
+  const match = channel.match(/^backfill:([^:]+):(.+)$/)
+  if (!match) return null
+  return { symbol: match[1], tf: match[2] }
+}
+
 function parseDepthChannel(channel: string): string | null {
   const match = channel.match(/^depth:(.+)$/)
   if (!match) return null

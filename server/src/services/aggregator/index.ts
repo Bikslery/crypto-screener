@@ -129,12 +129,49 @@ export async function fetchCandles(symbol: string, tf: string, limit: number, ex
   const adapter = adapters.find(a => a.exchange === targetExchange)
   if (!adapter) return []
   try {
-    return await adapter.fetchCandles(symbol, tf, limit)
-  } catch {
-    const fallback = adapters.find(a => a.exchange !== targetExchange)
-    if (fallback) return await fallback.fetchCandles(symbol, tf, limit)
-    return []
+    const result = await adapter.fetchCandles(symbol, tf, limit)
+    if (result.length > 0) return result
+  } catch {}
+  // Fallback to another adapter when primary returns empty or errors
+  const fallback = adapters.find(a => a.exchange !== targetExchange)
+  if (fallback) {
+    try {
+      return await fallback.fetchCandles(symbol, tf, limit)
+    } catch {}
   }
+  return []
+}
+
+export async function fetchCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number, exchange?: Exchange): Promise<UnifiedCandle[]> {
+  const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
+  const adapter = adapters.find(a => a.exchange === targetExchange)
+  if (!adapter) return []
+  try {
+    const result = await adapter.fetchCandlesRange(symbol, tf, fromMs, toMs)
+    if (result.length > 0) return result
+  } catch {}
+  const fallback = adapters.find(a => a.exchange !== targetExchange)
+  if (fallback) {
+    try {
+      return await fallback.fetchCandlesRange(symbol, tf, fromMs, toMs)
+    } catch {}
+  }
+  return []
+}
+
+export async function fetchListingTime(symbol: string, exchange?: Exchange): Promise<number> {
+  const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
+  const adapter = adapters.find(a => a.exchange === targetExchange)
+  if (!adapter) return 0
+  try {
+    return await adapter.fetchListingTime(symbol)
+  } catch {
+    return 0
+  }
+}
+
+export function getAdapter(exchange: Exchange): ExchangeAdapter | undefined {
+  return adapters.find(a => a.exchange === exchange)
 }
 
 export async function fetchDepth(symbol: string, limit: number, exchange?: Exchange): Promise<UnifiedDepth | null> {

@@ -97,7 +97,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
       symbol: instId?.replace('-USDT', 'USDT') || instId || '',
       exchange: this.exchange,
       timeframe: '', // extracted from channel
-      time: parseInt(d[0]) / 1000,
+      time: Math.floor(parseInt(d[0]) / 1000),
       open: parseFloat(d[1]),
       high: parseFloat(d[2]),
       low: parseFloat(d[3]),
@@ -151,13 +151,13 @@ export class OkxSpotAdapter implements ExchangeAdapter {
       symbol,
       exchange: this.exchange,
       timeframe: tf,
-      time: parseInt(k[0]) / 1000,
+      time: Math.floor(parseInt(k[0]) / 1000),
       open: parseFloat(k[1]),
       high: parseFloat(k[2]),
       low: parseFloat(k[3]),
       close: parseFloat(k[4]),
       volume: parseFloat(k[5]),
-    }))
+    })).reverse()
   }
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
@@ -176,6 +176,16 @@ export class OkxSpotAdapter implements ExchangeAdapter {
       asks: d.asks.map((a: string[]) => [parseFloat(a[0]), parseFloat(a[1])]),
       timestamp: Date.now(),
     }
+  }
+
+  async fetchCandlesRange(_symbol: string, _tf: string, _fromMs: number, _toMs: number): Promise<UnifiedCandle[]> {
+    // TODO: implement OKX range fetch
+    return []
+  }
+
+  async fetchListingTime(_symbol: string): Promise<number> {
+    // TODO: implement OKX listing time fetch
+    return 0
   }
 
   private scheduleReconnect() {

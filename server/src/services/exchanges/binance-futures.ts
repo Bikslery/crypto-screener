@@ -202,7 +202,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       symbol: k.s,
       exchange: this.exchange,
       timeframe: k.i,
-      time: k.t / 1000,
+      time: Math.floor(k.t / 1000),
       open: parseFloat(k.o),
       high: parseFloat(k.h),
       low: parseFloat(k.l),
@@ -228,11 +228,12 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
     const res = await fetch(url)
     const data = await res.json()
+    if (!Array.isArray(data)) return []
     return data.map((k: any[]) => ({
       symbol,
       exchange: this.exchange,
       timeframe: tf,
-      time: k[0] / 1000,
+      time: Math.floor(k[0] / 1000),
       open: parseFloat(k[1]),
       high: parseFloat(k[2]),
       low: parseFloat(k[3]),
@@ -241,10 +242,38 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     }))
   }
 
+  async fetchCandlesRange(symbol: string, tf: string, fromMs: number, toMs: number): Promise<UnifiedCandle[]> {
+    const interval = TF_MAP[tf] || '1m'
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&startTime=${fromMs}&endTime=${toMs}&limit=1500`
+    const res = await fetch(url)
+    const data = await res.json()
+    if (!Array.isArray(data)) return []
+    return data.map((k: any[]) => ({
+      symbol,
+      exchange: this.exchange,
+      timeframe: tf,
+      time: Math.floor(k[0] / 1000),
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+      volume: parseFloat(k[5]),
+    }))
+  }
+
+  async fetchListingTime(symbol: string): Promise<number> {
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1d&startTime=0&limit=1`
+    const res = await fetch(url)
+    const data = await res.json()
+    if (!Array.isArray(data) || data.length === 0) return 0
+    return Math.floor((data[0][0] as number) / 1000)
+  }
+
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
     const url = `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=${limit}`
     const res = await fetch(url)
     const data = await res.json()
+    if (!data.bids || !data.asks) return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() }
     return {
       symbol,
       exchange: this.exchange,
