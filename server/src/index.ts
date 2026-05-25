@@ -13,7 +13,7 @@ import watchlistRoutes from './routes/watchlists.js'
 import alertRoutes from './routes/alerts.js'
 import drawingRoutes from './routes/drawings.js'
 import { prisma } from './db/index.js'
-import { startPreload, isPreloaded } from './services/candles/preload.js'
+import { startPreload, isPreloaded, isBackfillComplete } from './services/candles/preload.js'
 
 const PORT = parseInt(process.env.PORT || '3001')
 
@@ -31,7 +31,7 @@ async function main() {
   app.use('/api/alerts', alertRoutes)
   app.use('/api/drawings', drawingRoutes)
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true, preloaded: isPreloaded() }))
+  app.get('/api/health', (_req, res) => res.json({ ok: true, preloaded: isPreloaded(), backfillComplete: isBackfillComplete() }))
 
   const server = createServer(app)
   const wss = new WebSocketServer({ server, path: '/ws' })

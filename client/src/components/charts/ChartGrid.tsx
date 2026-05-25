@@ -103,17 +103,59 @@ function useCandleData(
   const noMoreHistoryRef = useRef(false)   // флаг: больше нет старых данных
   const scrollThrottleRef = useRef<number>(0) // throttle scroll-запросов
 
+  // Helper: client-side gap-fill inner — заполняет мелкие гэпы flat-свечами
+  const clientGapFillInner = useCallback((candles: UnifiedCandle[], tfSec: number, maxFill: number): UnifiedCandle[] => {
+    const filled: UnifiedCandle[] = [candles[0]]
+    for (let i = 1; i < candles.length; i++) {
+      const prev = candles[i - 1]
+      const curr = candles[i]
+      const gapCandles = Math.round((curr.time - prev.time) / tfSec) - 1
+      if (gapCandles > 0 && gapCandles <= maxFill) {
+        let t = prev.time + tfSec
+        while (t < curr.time - tfSec * 0.5) {
+          filled.push({
+            symbol: prev.symbol, exchange: prev.exchange, timeframe: prev.timeframe,
+            time: t, open: prev.close, high: prev.close, low: prev.close,
+            close: prev.close, volume: 0,
+          })
+          t += tfSec
+        }
+      }
+      filled.push(curr)
+    }
+    return filled
+  }, [])
+
+  // Helper: client-side gap-fill — обрезает огромные гэпы (делистинг), затем fillInner
+  const clientGapFill = useCallback((candles: UnifiedCandle[], tfSec: number): UnifiedCandle[] => {
+    if (candles.length <= 1) return candles
+    const maxFill = tfSec <= 60 ? 500 : tfSec <= 3600 ? 300 : 200
+
+    // 1. Найти последний огромный гэп и обрезать
+    for (let i = candles.length - 1; i > 0; i--) {
+      const gapCandles = Math.round((candles[i].time - candles[i - 1].time) / tfSec) - 1
+      if (gapCandles > maxFill) {
+        return clientGapFillInner(candles.slice(i), tfSec, maxFill)
+      }
+    }
+    return clientGapFillInner(candles, tfSec, maxFill)
+  }, [clientGapFillInner])
+
   // Helper: apply candles array to chart
   const applyCandles = useCallback((candles: UnifiedCandle[]) => {
     if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
-    const candleData = candles.map(c => ({
+    // Gap-fill перед отрисовкой
+    const tfSec = getTfSeconds(tf)
+    const filled = clientGapFill(candles, tfSec)
+    candlesRef.current = filled
+    const candleData = filled.map(c => ({
       time: c.time as Time,
       open: c.open,
       high: c.high,
       low: c.low,
       close: c.close,
     }))
-    const volumeData = candles.map(c => ({
+    const volumeData = filled.map(c => ({
       time: c.time as Time,
       value: c.volume,
       color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
@@ -121,7 +163,7 @@ function useCandleData(
     candleRef.current.setData(candleData)
     volumeRef.current.setData(volumeData)
     chartRef.current?.timeScale().fitContent()
-  }, [])
+  }, [clientGapFill, tf])
 
   // Helper: prepend old candles to chart (for scroll loading)
   const prependCandlesToChart = useCallback((oldCandles: UnifiedCandle[]) => {
@@ -133,16 +175,22 @@ function useCandleData(
     for (const c of oldCandles) {
       if (!timeMap.has(c.time)) timeMap.set(c.time, c)
     }
-    candlesRef.current = Array.from(timeMap.values()).sort((a, b) => a.time - b.time)
+    let merged = Array.from(timeMap.values()).sort((a, b) => a.time - b.time)
 
-    const candleData = candlesRef.current.map(c => ({
+    // Gap-fill: заполняем мелкие гэпы flat-свечами
+    const tfSec = getTfSeconds(tf)
+    merged = clientGapFill(merged, tfSec)
+
+    candlesRef.current = merged
+
+    const candleData = merged.map(c => ({
       time: c.time as Time,
       open: c.open,
       high: c.high,
       low: c.low,
       close: c.close,
     }))
-    const volumeData = candlesRef.current.map(c => ({
+    const volumeData = merged.map(c => ({
       time: c.time as Time,
       value: c.volume,
       color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
@@ -150,7 +198,7 @@ function useCandleData(
     candleRef.current.setData(candleData)
     volumeRef.current.setData(volumeData)
     // НЕ делаем fitContent — сохраняем текущую позицию скролла
-  }, [])
+  }, [clientGapFill, clientGapFillInner])
 
   // Helper: fetch REST candles (DB + последние REST — мгновенно из серверного кэша)
   const fetchRestCandles = useCallback(async (limit: number, useFull: boolean) => {
@@ -162,7 +210,7 @@ function useCandleData(
       if (destroyedRef.current) return
       const candles = res.data as UnifiedCandle[]
       if (candles.length > 0) {
-        candlesRef.current = candles
+        // candlesRef.current устанавливается внутри applyCandles (с gap-fill)
         lastKlineTimeRef.current = candles[candles.length - 1].time
         // Если получили <limit — значит история закончилась
         if (useFull && candles.length < limit) {

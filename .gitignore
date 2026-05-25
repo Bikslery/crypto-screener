@@ -14,3 +14,7 @@ server/prisma/dev.db-journal
 *.png
 *.err
 TZ/
+node_modules/
+server/prisma/dev.db-shm
+server/prisma/dev.db-wal
+.hermes/

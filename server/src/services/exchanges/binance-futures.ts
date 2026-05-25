@@ -303,15 +303,26 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     let allCandles: UnifiedCandle[] = []
     let cursorMs = fromMs
     let consecutiveErrors = 0
+    const MAX_CONSECUTIVE_ERRORS = 20  // было 5 — слишком мало, abort слишком рано
 
     while (cursorMs < toMs) {
       const batchEndMs = Math.min(cursorMs + tfMs * batchSize, toMs)
-      const batch = await this.fetchCandlesRange(symbol, tf, cursorMs, batchEndMs)
+      let batch: UnifiedCandle[] = []
+      let batchSucceeded = false
 
-      if (batch.length === 0) {
-        cursorMs = batchEndMs + 1
+      try {
+        batch = await this.fetchCandlesRange(symbol, tf, cursorMs, batchEndMs)
+        if (batch.length > 0) batchSucceeded = true
+      } catch {}
+
+      if (!batchSucceeded) {
         consecutiveErrors++
-        if (consecutiveErrors > 5) break
+        // Skip+continue: сдвигаем на 1 окно вперёд вместо abort
+        cursorMs = batchEndMs + 1
+
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          break
+        }
         await new Promise(r => setTimeout(r, 100))
         continue
       }

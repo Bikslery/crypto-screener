@@ -72,13 +72,13 @@ export function getBestExchange(symbol: string): Exchange {
  */
 export async function preResolveExchanges(symbols: string[]): Promise<void> {
   console.log(`[ExchangeResolver] Pre-resolving ${symbols.length} symbols...`)
-  const BATCH = 5
+  const BATCH = 20   // 20 параллельных запросов (было 5 — слишком медленно для 400+ символов)
   for (let i = 0; i < symbols.length; i += BATCH) {
     const batch = symbols.slice(i, i + BATCH)
     await Promise.all(batch.map(s => resolveExchange(s)))
     // Пауза между батчами — не перегружаем API
     if (i + BATCH < symbols.length) {
-      await new Promise(r => setTimeout(r, 200))
+      await new Promise(r => setTimeout(r, 100))
     }
   }
   console.log(`[ExchangeResolver] Pre-resolved ${symbolExchangeMap.size} symbols`)

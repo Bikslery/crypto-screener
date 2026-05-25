@@ -1,7 +1,8 @@
 import { Router } from 'express'
 import { getTickers, getTicker, fetchCandles, fetchDepth, fetchListingTime, fetchAllCandlesRange, getAdapter, adapters } from '../services/aggregator/index.js'
 import { getCandlesFromDb, getDbCandleCount, startBackfill, isBackfillRunning } from '../services/candles/backfill.js'
-import { getCachedCandles, setCachedCandles, prependCachedCandles, setCachedCandlesFromRest, isRestCached, getCachedCandlesRange, getCachedCandlesOlder } from '../services/candles/cache.js'
+import { getCachedCandles, setCachedCandles, setCachedCandlesFromRest, isRestCached, getCachedCandlesRange, getCachedCandlesOlder } from '../services/candles/cache.js'
+import { fillGaps, fillGapsForTf, getTfSec, getMaxGapFill } from '../services/candles/gap-fill.js'
 import { getBestExchange, resolveExchange } from '../services/aggregator/exchange-resolver.js'
 import type { Exchange } from '../types.js'
 
@@ -44,6 +45,8 @@ router.get('/:symbol/candles', async (req, res) => {
   const fromTime = req.query.from_time ? parseInt(req.query.from_time as string) : undefined
   const toTime = req.query.to_time ? parseInt(req.query.to_time as string) : undefined
 
+  const tfSec = TF_SECONDS_MAP[tf] || 60
+
   // === scroll=1: подгрузка старых свечей (из кэша или DB, мгновенно) ===
   if (scroll && beforeTime != null) {
     const scrollLimit = Math.min(limit || 1000, 5000) // макс 5000 за запрос
@@ -52,12 +55,13 @@ router.get('/:symbol/candles', async (req, res) => {
     // 1. Пробуем кэш — если есть данные старше beforeTime
     const cachedOlder = getCachedCandlesOlder(symbol, tf, beforeTime, scrollLimit)
     if (cachedOlder.length >= scrollLimit) {
-      // В кэше достаточно данных — отдаём мгновенно
-      res.json({ candles: cachedOlder, hasMore: true })
+      // В кэше достаточно данных — отдаём мгновенно с gap-fill
+      const filled = fillGapsForTf(cachedOlder, tf)
+      res.json({ candles: filled, hasMore: true })
       return
     }
 
-    // 2. Пробуем DB
+    // 2. Пробуем DB — только от лучшего exchange (не смешиваем!)
     let dbCandles = await getCandlesFromDb(symbol, tf, bestEx, undefined, beforeTime, scrollLimit, 'desc')
 
     if (dbCandles.length === 0) {
@@ -65,8 +69,7 @@ router.get('/:symbol/candles', async (req, res) => {
       dbCandles = await getCandlesFromDb(symbol, tf, altEx, undefined, beforeTime, scrollLimit, 'desc')
     }
 
-    // DB возвращает desc (как нужно клиенту), но свечи из DB — без symbol/timeframe/exchange полей UnifiedCandle
-    // Нужно обогатить
+    // DB возвращает desc — обогащаем полями
     const enriched = dbCandles.map(c => ({
       symbol,
       timeframe: tf,
@@ -83,17 +86,18 @@ router.get('/:symbol/candles', async (req, res) => {
     const candleMap = new Map<number, any>()
     for (const c of cachedOlder) candleMap.set(c.time, c)
     for (const c of enriched) candleMap.set(c.time, c)
-    const merged = Array.from(candleMap.values())
+    let merged = Array.from(candleMap.values())
       .sort((a, b) => b.time - a.time) // DESC — самые свежие из старых первыми
       .slice(0, scrollLimit)
 
-    const hasMore = enriched.length >= scrollLimit || cachedOlder.length >= scrollLimit
-
-    // Если получили из DB — обновим кэш (prepend для полноты)
-    if (enriched.length > 0) {
-      const ascCandles = [...enriched].sort((a, b) => a.time - b.time)
-      prependCachedCandles(symbol, tf, ascCandles)
+    // Применяем gap-fill перед отправкой (ASC для fillGaps, потом обратно DESC)
+    if (merged.length > 1) {
+      const ascMerged = [...merged].sort((a, b) => a.time - b.time)
+      const filled = fillGapsForTf(ascMerged, tf)
+      merged = [...filled].sort((a, b) => b.time - a.time)
     }
+
+    const hasMore = enriched.length >= scrollLimit || cachedOlder.length >= scrollLimit
 
     res.json({ candles: merged, hasMore })
     return
@@ -108,17 +112,12 @@ router.get('/:symbol/candles', async (req, res) => {
     if (startMs <= 0) {
       // Не удалось определить listing time — fallback на обычный REST
       const candles = await fetchCandles(symbol, tf, 1500, exchange as any)
-      res.json(candles)
+      const filled = candles.length > 1 ? fillGapsForTf(candles, tf) : candles
+      res.json(filled)
       return
     }
 
-    // Depth limits — ослаблены, т.к. DB теперь хранит полную историю
-    // Старые лимиты (1m=30d, 5m=180d) были для REST-пагинации.
-    // С DB-хранилищем можно отдавать глубже, но мелкие TF всё равно тяжёлые.
-    const tfSec: Record<string, number> = {
-      '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
-      '1h': 3600, '2h': 7200, '4h': 14400, '1d': 86400, '1w': 604800,
-    }
+    // Depth limits
     const maxDepthSec: Record<string, number> = {
       '1m': 90 * 86400, '3m': 365 * 86400, '5m': 365 * 86400, '15m': 2 * 365 * 86400,
       '30m': 2 * 365 * 86400, '1h': 5 * 365 * 86400, '2h': 5 * 365 * 86400,
@@ -132,40 +131,46 @@ router.get('/:symbol/candles', async (req, res) => {
       const allCandles = await fetchAllCandlesRange(symbol, tf, startMs, endMs, (loaded) => {
         // Прогресс можно логировать, но не отсылаем частично — ждём всё
       })
-      res.json(allCandles)
+      const filled = allCandles.length > 1 ? fillGapsForTf(allCandles, tf) : allCandles
+      res.json(filled)
     } catch (err: any) {
       console.error(`[History] Error fetching all candles for ${symbol}/${tf}:`, err.message)
       const fallback = await fetchCandles(symbol, tf, 1500, exchange as any)
-      res.json(fallback)
+      const filled = fallback.length > 1 ? fillGapsForTf(fallback, tf) : fallback
+      res.json(filled)
     }
     return
   }
 
   // === full=1: максимум свечей — из кэша (мгновенно) или DB+REST fallback ===
   if (full) {
-    // 1. Проверяем кэш напрямую —preload заполняет его из DB/REST, оба источника надёжны
+    // 1. Проверяем кэш напрямую — preload заполняет его чистыми REST-данными
     const cached = getCachedCandles(symbol, tf)
     if (cached.length >= 100) {
       // Если есть from_time/to_time — фильтруем из кэша
       if (fromTime || toTime) {
         const rangeCandles = getCachedCandlesRange(symbol, tf, fromTime, toTime)
-        res.json(rangeCandles)
+        res.json(fillGapsForTf(rangeCandles, tf))
         return
       }
-      // Отдаём последние `limit` свечей (не весь кэш — может быть огромным)
-      const result = cached.length > limit ? cached.slice(cached.length - limit) : cached
-      res.json(result)
+      // Отдаём последние `limit` свечей с gap-fill
+      const sliced = cached.length > limit ? cached.slice(cached.length - limit) : cached
+      res.json(fillGapsForTf(sliced, tf))
       return
     }
 
     // 2. Кэш пуст/мало — fallback на DB + REST (медленный путь)
     const bestEx = await resolveExchange(symbol)
 
+    // DB: запрашиваем ТОЛЬКО от лучшего exchange (не смешиваем разные exchange!)
     let dbCandles = await getCandlesFromDb(symbol, tf, bestEx, fromTime, toTime)
 
+    // Если DB пуста у основного exchange — пробуем альтернативный (целиком, не мёржа)
+    let dbSourceExchange = bestEx
     if (dbCandles.length === 0) {
       const altEx: Exchange = bestEx === 'binance-futures' ? 'binance-spot' : 'binance-futures'
       dbCandles = await getCandlesFromDb(symbol, tf, altEx, fromTime, toTime)
+      dbSourceExchange = altEx
     }
 
     const adapter = adapters.find(a => a.exchange === bestEx)
@@ -190,23 +195,37 @@ router.get('/:symbol/candles', async (req, res) => {
       setCachedCandlesFromRest(symbol, tf, restCandles)
     }
 
-    // Мержим DB + REST (REST приоритет — затирает DB свечи на тех же таймстемпах)
+    // Мёржим DB + REST — ТОЛЬКО если они от одного exchange (предотвращаем mismatch-гэпы)
     if (dbCandles.length > 0 && restCandles.length > 0) {
-      const candleMap = new Map<number, any>()
-      for (const c of dbCandles) candleMap.set(c.time, c)
-      for (const c of restCandles) candleMap.set(c.time, c)
-      const merged = Array.from(candleMap.values()).sort((a: any, b: any) => a.time - b.time)
-      res.json(merged)
-      return
-    }
+      // Проверяем, что DB и REST от совместимых exchange
+      const dbExchange = dbSourceExchange
+      const restExchange = restCandles[0]?.exchange || bestEx
+      const sameExchangeFamily = dbExchange === restExchange ||
+        (dbExchange.includes('binance') && restExchange.includes('binance'))
 
-    if (dbCandles.length > 0) {
-      res.json(dbCandles)
+      if (sameExchangeFamily) {
+        const candleMap = new Map<number, any>()
+        for (const c of dbCandles) candleMap.set(c.time, c)
+        for (const c of restCandles) candleMap.set(c.time, c) // REST приоритет
+        const merged = Array.from(candleMap.values()).sort((a: any, b: any) => a.time - b.time)
+        // Gap-fill — заполняем мелкие гэпы, обрезаем огромные
+        res.json(fillGapsForTf(merged, tf))
+        return
+      }
+
+      // Разные exchange семьи — используем только REST (DB может иметь несовместимые времена)
+      res.json(fillGapsForTf(restCandles, tf))
       return
     }
 
     if (restCandles.length > 0) {
-      res.json(restCandles)
+      res.json(fillGapsForTf(restCandles, tf))
+      return
+    }
+
+    if (dbCandles.length > 0) {
+      // DB без REST — может быть гэпчатой, gap-fill заполнит мелкие, обрежет огромные
+      res.json(fillGapsForTf(dbCandles, tf))
       return
     }
 
@@ -217,15 +236,21 @@ router.get('/:symbol/candles', async (req, res) => {
   // Не full — просто отдаём REST или кэш
   const cached = getCachedCandles(symbol, tf)
   if (cached.length >= limit) {
-    res.json(cached.slice(cached.length - limit))
+    const sliced = cached.slice(cached.length - limit)
+    // Применяем gap-fill — кэш мог получить гэпы через WS-обновления
+    res.json(sliced.length > 1 ? fillGapsForTf(sliced, tf) : sliced)
     return
   }
 
   const candles = await fetchCandles(symbol, tf, limit, exchange as any)
   if (candles.length > 0) {
     setCachedCandles(symbol, tf, candles)
+    // Gap-fill перед отправкой — REST-данные обычно contiguous, но safety net
+    res.json(candles.length > 1 ? fillGapsForTf(candles, tf) : candles)
+    return
   }
-  res.json(candles)
+
+  res.json([])
 })
 
 router.post('/:symbol/backfill', async (req, res) => {
