@@ -13,6 +13,7 @@ import watchlistRoutes from './routes/watchlists.js'
 import alertRoutes from './routes/alerts.js'
 import drawingRoutes from './routes/drawings.js'
 import { prisma } from './db/index.js'
+import { startPreload, isPreloaded } from './services/candles/preload.js'
 
 const PORT = parseInt(process.env.PORT || '3001')
 
@@ -30,7 +31,7 @@ async function main() {
   app.use('/api/alerts', alertRoutes)
   app.use('/api/drawings', drawingRoutes)
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true }))
+  app.get('/api/health', (_req, res) => res.json({ ok: true, preloaded: isPreloaded() }))
 
   const server = createServer(app)
   const wss = new WebSocketServer({ server, path: '/ws' })
@@ -42,9 +43,15 @@ async function main() {
   startAlertEngine()
   startTelegramPolling()
 
+  // Предзагрузка свечей — работает асинхронно, не блокирует сервер
+  startPreload().catch(err => {
+    console.error('[Preload] Fatal error:', err.message)
+  })
+
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`)
     console.log(`WebSocket on ws://localhost:${PORT}/ws`)
+    console.log(`Preload running in background...`)
   })
 }
 
