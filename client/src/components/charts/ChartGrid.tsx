@@ -24,8 +24,13 @@ function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 const BATCH_SIZE = 1500
 const BACKFILL_CONCURRENCY = 5
 const BACKFILL_DELAY_MS = 50
+const RETRY_CONCURRENCY = 2
+const RETRY_DELAY_MS = 300
+const MAX_RETRIES = 2
 const LISTING_EPOCH_MS = 1262304000000 // 2010-01-01 — safe floor for any crypto
 const MAX_EMPTY_CHUNKS_IN_A_ROW = 2 // stop backfill only after this many fully-empty chunks (listing reached)
+
+type BatchResult = { ok: boolean; candles: UnifiedCandle[] }
 
 function exchangeBadge(ex: string): string {
   if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
@@ -203,31 +208,55 @@ function useFullHistory(
       let consecutiveEmptyChunks = 0
       let lastRenderAt = 0
       const RENDER_THROTTLE_MS = 150
+      const failed: { startMs: number; endMs: number }[] = []
+
+      const fetchBatch = async (b: { startMs: number; endMs: number }): Promise<BatchResult> => {
+        try {
+          const res = await api.get(`/coins/${symbol}/candles`, {
+            params: { tf, limit: BATCH_SIZE, startTime: b.startMs, endTime: b.endMs },
+          })
+          return { ok: true, candles: res.data as UnifiedCandle[] }
+        } catch {
+          return { ok: false, candles: [] }
+        }
+      }
+
+      const processBatchResults = (results: BatchResult[], trackFailed: boolean) => {
+        let nonEmptyOkInChunk = 0
+        let okCount = 0
+        for (const r of results) {
+          if (!r.ok) {
+            if (trackFailed) {
+              // failed batch already pushed by the caller
+            }
+            continue
+          }
+          okCount++
+          if (r.candles.length > 0) {
+            nonEmptyOkInChunk++
+            candleCache.prependCandles(symbol, tf, r.candles)
+          }
+        }
+        return { nonEmptyOkInChunk, okCount }
+      }
 
       for (let i = 0; i < batches.length; i += BACKFILL_CONCURRENCY) {
         if (cancelled.value || destroyedRef.current) return
         const chunk = batches.slice(i, i + BACKFILL_CONCURRENCY)
+
+        const chunkFailed: { startMs: number; endMs: number }[] = []
         const results = await Promise.all(
-          chunk.map(async (b) => {
-            try {
-              const res = await api.get(`/coins/${symbol}/candles`, {
-                params: { tf, limit: BATCH_SIZE, startTime: b.startMs, endTime: b.endMs },
-              })
-              return res.data as UnifiedCandle[]
-            } catch {
-              return []
-            }
+          chunk.map(async (b): Promise<BatchResult> => {
+            const r = await fetchBatch(b)
+            if (!r.ok) chunkFailed.push(b)
+            return r
           })
         )
 
         if (cancelled.value || destroyedRef.current) return
 
-        let nonEmptyInChunk = 0
-        for (const batchCandles of results) {
-          if (batchCandles.length === 0) continue
-          nonEmptyInChunk++
-          candleCache.prependCandles(symbol, tf, batchCandles)
-        }
+        failed.push(...chunkFailed)
+        const { nonEmptyOkInChunk, okCount } = processBatchResults(results, false)
 
         const isFirstChunk = i === 0
         const now = performance.now()
@@ -243,16 +272,47 @@ function useFullHistory(
           setIsInitialLoading(false)
         }
 
-        if (nonEmptyInChunk === 0) {
+        if (okCount > 0 && nonEmptyOkInChunk === 0) {
           consecutiveEmptyChunks++
           if (consecutiveEmptyChunks >= MAX_EMPTY_CHUNKS_IN_A_ROW) break
-        } else {
+        } else if (nonEmptyOkInChunk > 0) {
           consecutiveEmptyChunks = 0
         }
 
         if (i + BACKFILL_CONCURRENCY < batches.length) {
           await delay(BACKFILL_DELAY_MS)
         }
+      }
+
+      // Retry failed batches (network errors, 429, 5xx) with lower concurrency and longer delay
+      let retryBatch = failed.splice(0)
+      for (let attempt = 1; attempt <= MAX_RETRIES && retryBatch.length > 0; attempt++) {
+        if (cancelled.value || destroyedRef.current) return
+        const stillFailed: { startMs: number; endMs: number }[] = []
+
+        for (let i = 0; i < retryBatch.length; i += RETRY_CONCURRENCY) {
+          if (cancelled.value || destroyedRef.current) return
+          const chunk = retryBatch.slice(i, i + RETRY_CONCURRENCY)
+
+          const chunkFailed: { startMs: number; endMs: number }[] = []
+          const results = await Promise.all(
+            chunk.map(async (b): Promise<BatchResult> => {
+              const r = await fetchBatch(b)
+              if (!r.ok) chunkFailed.push(b)
+              return r
+            })
+          )
+
+          stillFailed.push(...chunkFailed)
+          processBatchResults(results, false)
+
+          if (i + RETRY_CONCURRENCY < retryBatch.length) {
+            await delay(RETRY_DELAY_MS)
+          }
+        }
+
+        retryBatch = stillFailed
+        if (retryBatch.length > 0) await delay(RETRY_DELAY_MS * attempt)
       }
 
       // Final render to ensure last chunks (which may have been throttled) hit the canvas.

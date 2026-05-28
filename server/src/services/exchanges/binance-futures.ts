@@ -18,6 +18,10 @@ const TF_MAP: Record<string, string> = {
   '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
 
+const STABLECOIN_BASES = new Set([
+  'USDC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'EUR', 'AEUR', 'EURI', 'USDSB', 'PYUSD',
+])
+
 export class BinanceFuturesAdapter implements ExchangeAdapter {
   name = 'Binance Futures'
   type: 'spot' | 'futures' = 'futures'
@@ -35,15 +39,18 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private intentionalCandleClose = false
   private intentionalDepthClose = false
   private precisionMap = new Map<string, number>()
+  private cryptoSymbols = new Set<string>()
+  private exchangeInfoLoaded = false
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
   onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
 
   connect() {
-    this.fetchExchangeInfo()
-    this.pollTickers()
-    this.pollTimer = setInterval(() => this.pollTickers(), 2000)
+    this.fetchExchangeInfo().then(() => {
+      this.pollTickers()
+      this.pollTimer = setInterval(() => this.pollTickers(), 2000)
+    })
     console.log(`[${this.name}] Connected (REST polling for tickers)`)
   }
 
@@ -51,8 +58,13 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     try {
       const res = await fetchWithTimeout('https://fapi.binance.com/fapi/v1/exchangeInfo')
       const data = await res.json()
+      let filtered = 0
       for (const s of data.symbols || []) {
         if (!s.symbol.endsWith('USDT')) continue
+        if (s.underlyingType === 'INDEX') { filtered++; continue }
+        if (s.contractType !== 'PERPETUAL') { filtered++; continue }
+        if (STABLECOIN_BASES.has(s.symbol.slice(0, -4))) { filtered++; continue }
+        this.cryptoSymbols.add(s.symbol)
         for (const f of s.filters || []) {
           if (f.filterType === 'PRICE_FILTER' && f.tickSize) {
             this.precisionMap.set(s.symbol, precisionFromTickSize(f.tickSize))
@@ -60,7 +72,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
           }
         }
       }
-      console.log(`[${this.name}] Loaded precision for ${this.precisionMap.size} symbols`)
+      this.exchangeInfoLoaded = true
+      console.log(`[${this.name}] Loaded ${this.cryptoSymbols.size} crypto symbols (filtered ${filtered} index/non-perp entries)`)
     } catch (e) {
       console.error(`[${this.name}] Failed to fetch exchangeInfo:`, e)
     }
@@ -72,6 +85,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       const arr = await res.json()
       for (const t of arr) {
         if (!t.symbol.endsWith('USDT')) continue
+        if (this.exchangeInfoLoaded && !this.cryptoSymbols.has(t.symbol)) continue
         const ticker = this.parseTicker(t)
         for (const cb of this.tickerCbs) cb(ticker)
       }

@@ -18,6 +18,10 @@ const TF_MAP: Record<string, string> = {
   '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
 
+const STABLECOIN_BASES = new Set([
+  'USDC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'EUR', 'AEUR', 'EURI', 'USDSB', 'PYUSD',
+])
+
 export class BinanceSpotAdapter implements ExchangeAdapter {
   name = 'Binance'
   type: 'spot' | 'futures' = 'spot'
@@ -53,6 +57,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       const data = await res.json()
       for (const s of data.symbols || []) {
         if (!s.symbol.endsWith('USDT')) continue
+        if (STABLECOIN_BASES.has(s.symbol.slice(0, -4))) continue
         for (const f of s.filters || []) {
           if (f.filterType === 'PRICE_FILTER' && f.tickSize) {
             this.precisionMap.set(s.symbol, precisionFromTickSize(f.tickSize))
@@ -72,6 +77,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       const arr = await res.json()
       for (const t of arr) {
         if (!t.symbol.endsWith('USDT')) continue
+        if (STABLECOIN_BASES.has(t.symbol.slice(0, -4))) continue
         const ticker = this.parseTicker(t)
         for (const cb of this.tickerCbs) cb(ticker)
       }
