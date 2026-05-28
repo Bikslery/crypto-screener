@@ -1,4 +1,4 @@
-import { useEffect, useRef, memo, useState } from 'react'
+import { useEffect, useRef, memo, useState, useCallback } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, useLivePrice } from '../../store'
@@ -536,7 +536,9 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
 })
 
 // Animation: chart appears with a fade + subtle scale
-const MiniChart = memo(function MiniChart({ symbol, animate }: { symbol: string; animate: boolean }) {
+const MiniChart = memo(function MiniChart({
+  symbol, animate, onLoaded,
+}: { symbol: string; animate: boolean; onLoaded?: (symbol: string) => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -545,15 +547,24 @@ const MiniChart = memo(function MiniChart({ symbol, animate }: { symbol: string;
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const [loaded, setLoaded] = useState(false)
+  const candlesDataRef = useRef<UnifiedCandle[]>([])
 
-  // Mark loaded once candles are rendered (via useCandles cache hit or REST response)
-  // We detect this by checking if data was set on the series
+  const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
+  const { isInitialLoading } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef)
+
   useEffect(() => {
-    if (!animate) { setLoaded(true); return }
-    // Small delay to let the chart render its data, then trigger animation
-    const t = setTimeout(() => setLoaded(true), 30)
-    return () => clearTimeout(t)
-  }, [symbol, tf, animate])
+    if (!animate) {
+      setLoaded(true)
+      if (onLoaded) onLoaded(symbol)
+      return
+    }
+    if (isInitialLoading) {
+      setLoaded(false)
+    } else {
+      setLoaded(true)
+      if (onLoaded) onLoaded(symbol)
+    }
+  }, [isInitialLoading, symbol, onLoaded, animate])
 
   useEffect(() => {
     destroyedRef.current = false
@@ -623,8 +634,6 @@ const MiniChart = memo(function MiniChart({ symbol, animate }: { symbol: string;
     }
   }, [symbol, tf, pricePrecision])
 
-  const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 1000)
   useWsCandle(symbol, tf, flush, destroyedRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
 
@@ -1171,51 +1180,56 @@ export function ChartGrid() {
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
   const [visibleCount, setVisibleCount] = useState(0)
+  const [loadedSet, setLoadedSet] = useState<Set<string>>(() => new Set())
 
-  // Listen for WS initial-candles push
   useInitialCandlesPush()
 
-  // Stagger chart mounting to avoid 9 simultaneous WebGL contexts + REST requests
   useEffect(() => {
-    if (topSymbols.length === 0) return
     setVisibleCount(0)
-  }, [topSymbols.length])
+    setLoadedSet(new Set())
+  }, [topSymbols])
 
   useEffect(() => {
-    if (visibleCount >= Math.min(topSymbols.length, 9)) return
+    if (visibleCount >= topSymbols.length) return
     const id = setTimeout(() => setVisibleCount(v => v + 1), 80)
     return () => clearTimeout(id)
   }, [visibleCount, topSymbols.length])
+
+  const handleLoaded = useCallback((symbol: string) => {
+    setLoadedSet(prev => {
+      if (prev.has(symbol)) return prev
+      const next = new Set(prev)
+      next.add(symbol)
+      return next
+    })
+  }, [])
 
   if (expandedSymbol) {
     return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} />
   }
 
-  if (topSymbols.length === 0) {
-    return (
-      <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
-        <div className="flex-1 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
-          {Array.from({ length: 9 }).map((_, idx) => (
-            <div key={idx} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
-              Loading...
-            </div>
-          ))}
-        </div>
-      </div>
-    )
-  }
+  const showOverlay =
+    topSymbols.length === 0 ||
+    visibleCount < topSymbols.length ||
+    loadedSet.size < topSymbols.length
 
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
-      <div className="flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
+      <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
         {topSymbols.slice(0, visibleCount).map((symbol) => (
-          <MiniChart key={symbol} symbol={symbol} animate={true} />
+          <MiniChart key={symbol} symbol={symbol} animate={true} onLoaded={handleLoaded} />
         ))}
         {Array.from({ length: Math.max(0, 9 - visibleCount) }).map((_, idx) => (
-          <div key={`placeholder-${idx}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
-            Loading...
-          </div>
+          <div key={`placeholder-${idx}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f]" />
         ))}
+
+        {showOverlay && (
+          <div className="chart-loading-overlay absolute inset-0 z-30 flex items-center justify-center pointer-events-none backdrop-blur-sm bg-[#0e0e0e]/30">
+            <span className="chart-loading-text text-sm font-medium text-[#cfcfcf] tracking-wide">
+              Графики загружаются…
+            </span>
+          </div>
+        )}
       </div>
     </div>
   )

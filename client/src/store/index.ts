@@ -55,11 +55,14 @@ interface CoinListStore {
   expandedSymbol: string | null
   activeTimeframe: Timeframe
   filterExchange: FilterExchange
+  pageIndex: number
+  pageCount: number
   setSort: (col: keyof UnifiedTicker) => void
   selectCoin: (symbol: string) => void
   expandChart: (symbol: string | null) => void
   setTimeframe: (tf: Timeframe) => void
   setFilterExchange: (fe: FilterExchange) => void
+  setPageIndex: (n: number) => void
   init: () => () => void
 }
 
@@ -70,12 +73,15 @@ function filterByExchange(coins: UnifiedTicker[], fe: FilterExchange): UnifiedTi
   return coins.filter(c => c.exchange.includes(fe))
 }
 
-function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; filterExchange: FilterExchange }) {
+function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; filterExchange: FilterExchange; pageIndex: number }) {
   const filtered = filterByExchange(state.coins, state.filterExchange)
   const sorted = sortCoins(filtered, state.sortBy, state.sortDir)
-  const newTop = sorted.slice(0, 9).map(c => c.symbol)
+  const pageCount = Math.max(1, Math.ceil(sorted.length / 9))
+  const safePage = Math.min(Math.max(0, state.pageIndex), pageCount - 1)
+  const start = safePage * 9
+  const newTop = sorted.slice(start, start + 9).map(c => c.symbol)
   const topChartSymbols = sameTop9(newTop, prevTopSymbols) ? prevTopSymbols : (prevTopSymbols = newTop)
-  return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols }
+  return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols, pageCount, pageIndex: safePage }
 }
 
 // --- Live price store (decoupled from the heavy CoinListStore) ----------------
@@ -125,11 +131,13 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   expandedSymbol: null,
   activeTimeframe: '5m',
   filterExchange: 'all',
+  pageIndex: 0,
+  pageCount: 1,
 
   setSort: (col) => {
     const s = get()
     const newDir: 'asc' | 'desc' = s.sortBy === col && s.sortDir === 'desc' ? 'asc' : 'desc'
-    const next = { sortBy: col, sortDir: newDir }
+    const next = { sortBy: col, sortDir: newDir, pageIndex: 0 }
     set({ ...next, ...recompute({ ...s, ...next }) })
   },
 
@@ -141,7 +149,12 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
   setFilterExchange: (fe) => {
     const s = get()
-    set({ filterExchange: fe, ...recompute({ ...s, filterExchange: fe }) })
+    set({ filterExchange: fe, pageIndex: 0, ...recompute({ ...s, filterExchange: fe, pageIndex: 0 }) })
+  },
+
+  setPageIndex: (n) => {
+    const s = get()
+    set({ pageIndex: n, ...recompute({ ...s, pageIndex: n }) })
   },
 
   init: () => {

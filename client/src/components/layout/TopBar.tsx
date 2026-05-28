@@ -1,6 +1,6 @@
 import { useCoinListStore, useAuthStore, useUIStore } from '../../store'
 import type { Timeframe, FilterExchange } from '../../types'
-import { LogIn, User } from 'lucide-react'
+import { LogIn, User, ChevronLeft, ChevronRight } from 'lucide-react'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
   { value: '1m', label: '1m' },
@@ -39,6 +39,9 @@ export function TopBar() {
   const setTimeframe = useCoinListStore(s => s.setTimeframe)
   const filterExchange = useCoinListStore(s => s.filterExchange)
   const setFilterExchange = useCoinListStore(s => s.setFilterExchange)
+  const pageIndex = useCoinListStore(s => s.pageIndex)
+  const pageCount = useCoinListStore(s => s.pageCount)
+  const setPageIndex = useCoinListStore(s => s.setPageIndex)
   const { isLoggedIn, email } = useAuthStore()
   const { setShowLogin, setShowProfile } = useUIStore()
 
@@ -53,7 +56,7 @@ export function TopBar() {
         <span className="font-bold text-[13px] text-white tracking-tight">ScalpBoard</span>
       </div>
 
-      {/* Центр: таймфреймы */}
+      {/* Центр: таймфреймы + пагинация */}
       <div className="flex items-center gap-[2px]">
         {TF_OPTIONS.map(opt => (
           <button
@@ -70,6 +73,38 @@ export function TopBar() {
             {opt.label}
           </button>
         ))}
+
+        <div className="w-[1px] h-[20px] bg-[#1f1f1f] mx-2" />
+
+        <button
+          aria-label="Предыдущие 9 графиков"
+          disabled={pageIndex === 0}
+          className={`
+            flex items-center justify-center h-[26px] px-[6px] text-[11px] font-mono font-medium rounded-[4px] border transition-all duration-150
+            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:border-transparent disabled:hover:text-[#666]
+            bg-transparent text-[#666] border-transparent hover:text-[#aaa] hover:border-[#2a2a2a] cursor-pointer
+          `}
+          onClick={() => setPageIndex(pageIndex - 1)}
+        >
+          <ChevronLeft size={13} />
+        </button>
+
+        <span className="px-[8px] text-[11px] font-mono text-[#aaa] tabular-nums">
+          {pageIndex + 1} / {pageCount}
+        </span>
+
+        <button
+          aria-label="Следующие 9 графиков"
+          disabled={pageIndex >= pageCount - 1}
+          className={`
+            flex items-center justify-center h-[26px] px-[6px] text-[11px] font-mono font-medium rounded-[4px] border transition-all duration-150
+            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:border-transparent disabled:hover:text-[#666]
+            bg-transparent text-[#666] border-transparent hover:text-[#aaa] hover:border-[#2a2a2a] cursor-pointer
+          `}
+          onClick={() => setPageIndex(pageIndex + 1)}
+        >
+          <ChevronRight size={13} />
+        </button>
       </div>
 
       {/* Право: фильтры бирж + авторизация */}

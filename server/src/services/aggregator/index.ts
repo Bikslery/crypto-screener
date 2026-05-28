@@ -3,7 +3,7 @@ import { BinanceSpotAdapter } from '../exchanges/binance-spot.js'
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
 import { broadcast } from '../../ws/hub.js'
-import { updateCachedCandle, getCachedCandles, setCachedCandlesFromRest } from '../candles/candle-cache.js'
+import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
 
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
@@ -98,12 +98,11 @@ async function computeMetrics() {
     for (const coin of topCoins) {
       try {
         const cached1m = getCachedCandles(coin.symbol, '1m')
-        let candles1m = cached1m?.slice(-5)
-        if (!candles1m || candles1m.length < 2) {
+        let candles1m: UnifiedCandle[]
+        if (cached1m && cached1m.length >= 2) {
+          candles1m = cached1m.slice(-5)
+        } else {
           candles1m = await fetchCandles(coin.symbol, '1m', 5, coin.exchange)
-          if (candles1m.length > 0) {
-            if (!cached1m) setCachedCandlesFromRest(coin.symbol, '1m', candles1m)
-          }
         }
         if (candles1m.length >= 2) {
           const highs = candles1m.map(c => c.high)
@@ -115,12 +114,11 @@ async function computeMetrics() {
         }
 
         const cached5m = getCachedCandles(coin.symbol, '5m')
-        let candles5m = cached5m?.slice(-14)
-        if (!candles5m || candles5m.length < 2) {
+        let candles5m: UnifiedCandle[]
+        if (cached5m && cached5m.length >= 14) {
+          candles5m = cached5m.slice(-14)
+        } else {
           candles5m = await fetchCandles(coin.symbol, '5m', 14, coin.exchange)
-          if (candles5m.length > 0) {
-            if (!cached5m) setCachedCandlesFromRest(coin.symbol, '5m', candles5m)
-          }
         }
         if (candles5m.length >= 2) {
           const trs = candles5m.map((c, i) => {

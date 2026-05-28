@@ -71,14 +71,16 @@ router.get('/:symbol/candles', async (req, res) => {
     return
   }
 
-  // Cache-first
+  // Cache-first, but only if cache has enough candles (avoid serving short
+  // metric-buffer slices as full history)
   const cached = getCachedCandles(symbol, tf)
-  if (cached && cached.length > 0) {
+  const minUsable = Math.min(Math.floor(limit * 0.5), 100)
+  if (cached && cached.length >= minUsable) {
     res.json(cached.slice(-limit))
     return
   }
 
-  // Fallback: fetch from adapter
+  // Cache empty or too small — fetch from adapter
   const candles = await fetchCandles(symbol, tf, limit, exchange as any)
   if (candles.length > 0) {
     setCachedCandlesFromRest(symbol, tf, candles)
