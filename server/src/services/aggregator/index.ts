@@ -1,11 +1,9 @@
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import { BinanceSpotAdapter } from '../exchanges/binance-spot.js'
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
-// import { BybitFuturesAdapter } from '../exchanges/bybit-futures.js'
-// import { OkxSpotAdapter } from '../exchanges/okx-spot.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
 import { broadcast } from '../../ws/hub.js'
-import { updateCachedCandle } from '../candles/candle-cache.js'
+import { updateCachedCandle, getCachedCandles, setCachedCandlesFromRest } from '../candles/candle-cache.js'
 
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
@@ -22,9 +20,9 @@ const EXCHANGE_PRIORITY: Record<string, number> = {
   'binance-spot': 2,
 }
 
-function pickBest(tickers: UnifiedTicker[]): Map<string, UnifiedTicker> {
+function pickBestFromMap(): Map<string, UnifiedTicker> {
   const best = new Map<string, UnifiedTicker>()
-  for (const t of tickers) {
+  for (const t of tickerMap.values()) {
     const existing = best.get(t.symbol)
     if (!existing || EXCHANGE_PRIORITY[t.exchange] > EXCHANGE_PRIORITY[existing.exchange]) {
       best.set(t.symbol, t)
@@ -34,10 +32,18 @@ function pickBest(tickers: UnifiedTicker[]): Map<string, UnifiedTicker> {
 }
 
 let lastBroadcast = 0
-const BROADCAST_INTERVAL = 50 // 50ms for near real-time
+const BROADCAST_INTERVAL = 50
 let loggedFirst = false
 let tickerCount = 0
 const metricsMap = new Map<string, { range1m: number; natr5m: number }>()
+
+let cachedBestMap: Map<string, UnifiedTicker> | null = null
+let cachedBest: UnifiedTicker[] | null = null
+
+function getBestMap(): Map<string, UnifiedTicker> {
+  if (!cachedBestMap) cachedBestMap = pickBestFromMap()
+  return cachedBestMap
+}
 
 export function startAggregator() {
   for (const adapter of adapters) {
@@ -48,11 +54,13 @@ export function startAggregator() {
         ticker.natr5m = m.natr5m
       }
       tickerMap.set(`${ticker.symbol}:${ticker.exchange}`, ticker)
+      cachedBestMap = null
+      cachedBest = null
       tickerCount++
       const now = Date.now()
       if (now - lastBroadcast > BROADCAST_INTERVAL) {
         lastBroadcast = now
-        const best = pickBest(Array.from(tickerMap.values()))
+        const best = getBestMap()
         const arr = Array.from(best.values())
         if (!loggedFirst) {
           loggedFirst = true
@@ -80,14 +88,23 @@ export function startAggregator() {
 
 async function computeMetrics() {
   const compute = async () => {
-    const best = pickBest(Array.from(tickerMap.values()))
+    const best = getBestMap()
     const topCoins = Array.from(best.values())
       .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
       .slice(0, 200)
 
+    const symbolsToRemove: string[] = []
+
     for (const coin of topCoins) {
       try {
-        const candles1m = await fetchCandles(coin.symbol, '1m', 5, coin.exchange)
+        const cached1m = getCachedCandles(coin.symbol, '1m')
+        let candles1m = cached1m?.slice(-5)
+        if (!candles1m || candles1m.length < 2) {
+          candles1m = await fetchCandles(coin.symbol, '1m', 5, coin.exchange)
+          if (candles1m.length > 0) {
+            if (!cached1m) setCachedCandlesFromRest(coin.symbol, '1m', candles1m)
+          }
+        }
         if (candles1m.length >= 2) {
           const highs = candles1m.map(c => c.high)
           const lows = candles1m.map(c => c.low)
@@ -97,7 +114,14 @@ async function computeMetrics() {
           metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { natr5m: 0 }), range1m })
         }
 
-        const candles5m = await fetchCandles(coin.symbol, '5m', 14, coin.exchange)
+        const cached5m = getCachedCandles(coin.symbol, '5m')
+        let candles5m = cached5m?.slice(-14)
+        if (!candles5m || candles5m.length < 2) {
+          candles5m = await fetchCandles(coin.symbol, '5m', 14, coin.exchange)
+          if (candles5m.length > 0) {
+            if (!cached5m) setCachedCandlesFromRest(coin.symbol, '5m', candles5m)
+          }
+        }
         if (candles5m.length >= 2) {
           const trs = candles5m.map((c, i) => {
             if (i === 0) return c.high - c.low
@@ -108,10 +132,17 @@ async function computeMetrics() {
           const natr5m = coin.price > 0 ? (atr / coin.price) * 100 : 0
           metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { range1m: 0 }), natr5m })
         }
-      } catch {}
+      } catch (e) {
+        console.warn(`[Metrics] Failed for ${coin.symbol}:`, e instanceof Error ? e.message : e)
+      }
     }
 
-    console.log(`[Metrics] Updated range1m/natr5m for top ${topCoins.length} coins`)
+    for (const [symbol] of metricsMap) {
+      if (!best.has(symbol)) symbolsToRemove.push(symbol)
+    }
+    for (const s of symbolsToRemove) metricsMap.delete(s)
+
+    console.log(`[Metrics] Updated range1m/natr5m for top ${topCoins.length} coins (cache hits preferred)`)
   }
 
   await compute()
@@ -119,13 +150,14 @@ async function computeMetrics() {
 }
 
 export function getTickers(): UnifiedTicker[] {
-  return Array.from(pickBest(Array.from(tickerMap.values())).values())
+  if (!cachedBest) {
+    cachedBest = Array.from(getBestMap().values())
+  }
+  return cachedBest
 }
 
 export function getTicker(symbol: string): UnifiedTicker | undefined {
-  const all = Array.from(tickerMap.values()).filter(t => t.symbol === symbol)
-  const best = pickBest(all)
-  return best.get(symbol)
+  return getBestMap().get(symbol)
 }
 
 export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange, startTime?: number, endTime?: number): Promise<UnifiedCandle[]> {

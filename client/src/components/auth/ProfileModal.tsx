@@ -20,7 +20,7 @@ export function ProfileModal() {
     api.get('/auth/telegram-link')
       .then((res: any) => setTelegramLink(res.data.link))
       .catch(() => {})
-  }, [telegramBound])
+  }, [])
 
   const handleUnbind = async () => {
     try {

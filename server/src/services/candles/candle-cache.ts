@@ -3,37 +3,103 @@ import type { UnifiedCandle } from '../../types.js'
 const MAX_CANDLES_PER_KEY = 2000
 const MAX_TOTAL_CANDLES = 500000
 
-const cache = new Map<string, UnifiedCandle[]>()
-const keyOrder: string[] = []
-const restKeys = new Set<string>()
+class LRU {
+  private map = new Map<string, { prev: string | null; next: string | null }>()
+  private head: string | null = null
+  private tail: string | null = null
 
-function touchKey(key: string) {
-  const idx = keyOrder.indexOf(key)
-  if (idx !== -1) {
-    keyOrder.splice(idx, 1)
+  touch(key: string) {
+    if (!this.map.has(key)) {
+      this.map.set(key, { prev: null, next: this.head })
+      if (this.head !== null) {
+        const h = this.map.get(this.head)!
+        h.prev = key
+      }
+      this.head = key
+      if (this.tail === null) this.tail = key
+      return
+    }
+    const node = this.map.get(key)!
+    if (this.head === key) return
+    this.detach(key, node)
+    node.prev = null
+    node.next = this.head
+    if (this.head !== null) {
+      const h = this.map.get(this.head)!
+      h.prev = key
+    }
+    this.head = key
   }
-  keyOrder.push(key)
+
+  private detach(key: string, node: { prev: string | null; next: string | null }) {
+    if (node.prev !== null) {
+      const p = this.map.get(node.prev)!
+      p.next = node.next
+    } else {
+      this.head = node.next
+    }
+    if (node.next !== null) {
+      const n = this.map.get(node.next)!
+      n.prev = node.prev
+    } else {
+      this.tail = node.prev
+    }
+  }
+
+  evictTail(): string | null {
+    if (this.tail === null) return null
+    const key = this.tail
+    const node = this.map.get(key)!
+    this.map.delete(key)
+    this.tail = node.prev
+    if (this.tail !== null) {
+      const t = this.map.get(this.tail)!
+      t.next = null
+    } else {
+      this.head = null
+    }
+    return key
+  }
+
+  has(key: string): boolean {
+    return this.map.has(key)
+  }
+
+  get size(): number {
+    return this.map.size
+  }
+
+  keysFromRecent(): string[] {
+    const result: string[] = []
+    let cur = this.head
+    while (cur !== null) {
+      result.push(cur)
+      const node = this.map.get(cur)
+      cur = node ? node.next : null
+    }
+    return result
+  }
 }
 
-function totalCandles(): number {
-  let total = 0
-  for (const arr of cache.values()) total += arr.length
-  return total
-}
+const cache = new Map<string, UnifiedCandle[]>()
+const lru = new LRU()
+const restKeys = new Set<string>()
+let totalCandleCount = 0
 
 function evictIfNeeded() {
-  while (totalCandles() > MAX_TOTAL_CANDLES && keyOrder.length > 0) {
-    const oldestKey = keyOrder.shift()!
-    cache.delete(oldestKey)
-    restKeys.delete(oldestKey)
+  while (totalCandleCount > MAX_TOTAL_CANDLES) {
+    const key = lru.evictTail()
+    if (key === null) break
+    const arr = cache.get(key)
+    if (arr) totalCandleCount -= arr.length
+    cache.delete(key)
+    restKeys.delete(key)
   }
 }
 
 function mergeCandles(existing: UnifiedCandle[], incoming: UnifiedCandle[]): UnifiedCandle[] {
   const map = new Map<number, UnifiedCandle>()
-  // Existing first (lower priority on overlap)
   for (const c of existing) map.set(c.time, c)
-  // Incoming overwrites on time overlap (new data priority)
   for (const c of incoming) map.set(c.time, c)
   const merged = Array.from(map.values()).sort((a, b) => a.time - b.time)
   return merged.length > MAX_CANDLES_PER_KEY
@@ -44,16 +110,18 @@ function mergeCandles(existing: UnifiedCandle[], incoming: UnifiedCandle[]): Uni
 export function getCachedCandles(symbol: string, tf: string): UnifiedCandle[] | undefined {
   const key = `${symbol}:${tf}`
   const data = cache.get(key)
-  if (data) touchKey(key)
+  if (data) lru.touch(key)
   return data
 }
 
 export function setCachedCandles(symbol: string, tf: string, candles: UnifiedCandle[]): void {
   const key = `${symbol}:${tf}`
   const existing = cache.get(key)
+  if (existing) totalCandleCount -= existing.length
   const merged = existing ? mergeCandles(existing, candles) : candles.slice(0, MAX_CANDLES_PER_KEY)
   cache.set(key, merged)
-  touchKey(key)
+  totalCandleCount += merged.length
+  lru.touch(key)
   evictIfNeeded()
 }
 
@@ -69,19 +137,17 @@ export function updateCachedCandle(candle: UnifiedCandle): void {
   if (!arr) return
 
   const lastIdx = arr.length - 1
-  // If last candle has same time, update it
   if (lastIdx >= 0 && arr[lastIdx].time === candle.time) {
     arr[lastIdx] = candle
     return
   }
-  // If new candle time > last, append
   if (lastIdx >= 0 && candle.time > arr[lastIdx].time) {
     arr.push(candle)
-    if (arr.length > MAX_CANDLES_PER_KEY) arr.shift()
-    touchKey(key)
+    totalCandleCount++
+    if (arr.length > MAX_CANDLES_PER_KEY) { arr.shift(); totalCandleCount-- }
+    lru.touch(key)
     return
   }
-  // Find and update existing candle by time
   const idx = arr.findIndex(c => c.time === candle.time)
   if (idx !== -1) {
     arr[idx] = candle
@@ -94,16 +160,15 @@ export function isRestCached(symbol: string, tf: string): boolean {
 
 export function clearCache(): void {
   cache.clear()
-  keyOrder.length = 0
+  totalCandleCount = 0
   restKeys.clear()
 }
 
 export function getTopCachedSymbols(tf: string, limit: number): string[] {
-  // Return symbols that have cached data for the given tf,
-  // ordered by most recently touched
   const symbols: string[] = []
-  for (let i = keyOrder.length - 1; i >= 0 && symbols.length < limit; i--) {
-    const key = keyOrder[i]
+  const keys = lru.keysFromRecent()
+  for (const key of keys) {
+    if (symbols.length >= limit) break
     if (key.endsWith(`:${tf}`)) {
       symbols.push(key.split(':')[0])
     }

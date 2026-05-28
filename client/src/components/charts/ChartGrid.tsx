@@ -1,9 +1,9 @@
-import { useEffect, useRef, memo, useState, useCallback } from 'react'
+import { useEffect, useRef, memo, useState } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, useLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
-import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, wsOnType as wsOnMsgType } from '../../services/ws'
+import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import api from '../../services/api'
 import type { Timeframe, UnifiedCandle } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
@@ -21,10 +21,11 @@ const TF_SECONDS: Record<string, number> = {
 }
 function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 
-const BATCH_SIZE = 1000
+const BATCH_SIZE = 1500
 const BACKFILL_CONCURRENCY = 5
 const BACKFILL_DELAY_MS = 50
 const LISTING_EPOCH_MS = 1262304000000 // 2010-01-01 — safe floor for any crypto
+const MAX_EMPTY_CHUNKS_IN_A_ROW = 2 // stop backfill only after this many fully-empty chunks (listing reached)
 
 function exchangeBadge(ex: string): string {
   if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
@@ -36,19 +37,22 @@ function exchangeBadge(ex: string): string {
 }
 
 // Receive WS initial-candles push ONCE and store in client cache
+// Reset on reconnect so server can push fresh data after reconnection
 let initialPushReceived = false
 
 function useInitialCandlesPush() {
   useEffect(() => {
-    if (initialPushReceived) return
-    const unsub = wsOnMsgType('initial-candles', (msg) => {
+    const unsubReconnect = wsOnType('open', () => {
+      initialPushReceived = false
+    })
+    const unsubPush = wsOnType('initial-candles', (msg) => {
       if (initialPushReceived) return
       initialPushReceived = true
       const data = msg.data as Record<string, UnifiedCandle[]> | undefined
       if (!data) return
       candleCache.storeBulk(data)
     })
-    return unsub
+    return () => { unsubReconnect(); unsubPush() }
   }, [])
 }
 
@@ -128,10 +132,13 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-) {
+): { isInitialLoading: boolean } {
+  const [isInitialLoading, setIsInitialLoading] = useState(true)
+
   useEffect(() => {
     const cancelled = { value: false }
     const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+    setIsInitialLoading(true)
 
     const renderCandles = (candles: UnifiedCandle[], fitContent: boolean) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
@@ -163,10 +170,14 @@ function useFullHistory(
           candles = res.data as UnifiedCandle[]
           if (candles.length > 0) candleCache.setCandles(symbol, tf, candles)
         } catch {
+          setIsInitialLoading(false)
           return
         }
       }
-      if (!candles || candles.length === 0) return
+      if (!candles || candles.length === 0) {
+        setIsInitialLoading(false)
+        return
+      }
       if (cancelled.value || destroyedRef.current) return
 
       renderCandles(candles, true)
@@ -180,7 +191,18 @@ function useFullHistory(
         const startMs = endMs - batchSpanMs
         batches.push({ startMs: Math.max(startMs, LISTING_EPOCH_MS), endMs })
       }
-      if (batches.length === 0) return
+      if (batches.length === 0) {
+        setIsInitialLoading(false)
+        return
+      }
+
+      // Yield to browser so initial frame paints before backfill kicks in.
+      await delay(0)
+      if (cancelled.value || destroyedRef.current) return
+
+      let consecutiveEmptyChunks = 0
+      let lastRenderAt = 0
+      const RENDER_THROTTLE_MS = 150
 
       for (let i = 0; i < batches.length; i += BACKFILL_CONCURRENCY) {
         if (cancelled.value || destroyedRef.current) return
@@ -200,20 +222,44 @@ function useFullHistory(
 
         if (cancelled.value || destroyedRef.current) return
 
-        let anyEmpty = false
+        let nonEmptyInChunk = 0
         for (const batchCandles of results) {
-          if (batchCandles.length === 0) { anyEmpty = true; continue }
+          if (batchCandles.length === 0) continue
+          nonEmptyInChunk++
           candleCache.prependCandles(symbol, tf, batchCandles)
         }
 
+        const isFirstChunk = i === 0
+        const now = performance.now()
+        if (isFirstChunk || now - lastRenderAt >= RENDER_THROTTLE_MS) {
+          const cached = candleCache.getCandles(symbol, tf)
+          if (cached && cached.length > 0) {
+            renderCandles(cached, false)
+          }
+          lastRenderAt = now
+        }
+
+        if (isFirstChunk) {
+          setIsInitialLoading(false)
+        }
+
+        if (nonEmptyInChunk === 0) {
+          consecutiveEmptyChunks++
+          if (consecutiveEmptyChunks >= MAX_EMPTY_CHUNKS_IN_A_ROW) break
+        } else {
+          consecutiveEmptyChunks = 0
+        }
+
+        if (i + BACKFILL_CONCURRENCY < batches.length) {
+          await delay(BACKFILL_DELAY_MS)
+        }
+      }
+
+      // Final render to ensure last chunks (which may have been throttled) hit the canvas.
+      if (!cancelled.value && !destroyedRef.current) {
         const cached = candleCache.getCandles(symbol, tf)
         if (cached && cached.length > 0) {
           renderCandles(cached, false)
-        }
-
-        if (anyEmpty) return
-        if (i + BACKFILL_CONCURRENCY < batches.length) {
-          await delay(BACKFILL_DELAY_MS)
         }
       }
     }
@@ -224,6 +270,8 @@ function useFullHistory(
       cancelled.value = true
     }
   }, [symbol, tf])
+
+  return { isInitialLoading }
 }
 
 // RAF-throttled candle/volume updates: only the latest pending payload per frame
@@ -516,7 +564,7 @@ const MiniChart = memo(function MiniChart({ symbol, animate }: { symbol: string;
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 300)
+  useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 1000)
   useWsCandle(symbol, tf, flush, destroyedRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
 
@@ -656,7 +704,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const [chartVersion, setChartVersion] = useState(0)
 
   const {
-    drawings,
     activeTool,
     setActiveTool,
     removeDrawing,
@@ -742,7 +789,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef)
+  const { isInitialLoading } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef)
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
 
@@ -949,6 +996,15 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
+        {isInitialLoading && (
+          <div
+            className="chart-loading-overlay absolute inset-0 z-30 flex items-center justify-center pointer-events-none backdrop-blur-sm bg-[#0e0e0e]/30"
+          >
+            <span className="chart-loading-text text-sm font-medium text-[#cfcfcf] tracking-wide">
+              График загружается…
+            </span>
+          </div>
+        )}
         {/* SVG overlay for preview line and pending point only */}
         {(pendingPointPixel || previewLine) && (
           <svg
@@ -1055,16 +1111,21 @@ export function ChartGrid() {
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
   const [visibleCount, setVisibleCount] = useState(0)
-  const mountedRef = useRef(false)
 
   // Listen for WS initial-candles push
   useInitialCandlesPush()
 
-  // All 9 charts mount simultaneously — no stagger
+  // Stagger chart mounting to avoid 9 simultaneous WebGL contexts + REST requests
   useEffect(() => {
     if (topSymbols.length === 0) return
-    setVisibleCount(topSymbols.length)
-  }, [topSymbols])
+    setVisibleCount(0)
+  }, [topSymbols.length])
+
+  useEffect(() => {
+    if (visibleCount >= Math.min(topSymbols.length, 9)) return
+    const id = setTimeout(() => setVisibleCount(v => v + 1), 80)
+    return () => clearTimeout(id)
+  }, [visibleCount, topSymbols.length])
 
   if (expandedSymbol) {
     return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} />
@@ -1074,8 +1135,8 @@ export function ChartGrid() {
     return (
       <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
         <div className="flex-1 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
-          {Array.from({ length: 9 }).map((_, i) => (
-            <div key={i} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
+          {Array.from({ length: 9 }).map((_, idx) => (
+            <div key={idx} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
               Loading...
             </div>
           ))}
@@ -1087,11 +1148,11 @@ export function ChartGrid() {
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
-        {topSymbols.slice(0, visibleCount).map((symbol, i) => (
+        {topSymbols.slice(0, visibleCount).map((symbol) => (
           <MiniChart key={symbol} symbol={symbol} animate={true} />
         ))}
-        {Array.from({ length: Math.max(0, 9 - visibleCount) }).map((_, i) => (
-          <div key={`placeholder-${i}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
+        {Array.from({ length: Math.max(0, 9 - visibleCount) }).map((_, idx) => (
+          <div key={`placeholder-${idx}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
             Loading...
           </div>
         ))}

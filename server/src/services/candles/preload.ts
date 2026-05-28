@@ -2,7 +2,7 @@ import type { ExchangeAdapter } from '../exchanges/types.js'
 import { setCachedCandlesFromRest, getCachedCandles } from './candle-cache.js'
 import { getTickers } from '../aggregator/index.js'
 
-export const PRELOAD_TFS = ['5m', '1m', '15m', '1h'] as const
+export const PRELOAD_TFS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d', '1w'] as const
 const TOP_SYMBOLS_COUNT = 50
 const P1_CONCURRENCY = 5
 const RATE_LIMIT_MS = 100
@@ -105,7 +105,8 @@ function periodicRefresh(
   adapters: ExchangeAdapter[]
 ): void {
   const refreshTfs = ['5m', '1m', '15m']
-  setInterval(async () => {
+
+  async function doRefresh() {
     console.log('[Preload] Periodic refresh: re-fetching 5m/1m/15m for top symbols')
     for (let i = 0; i < topSymbols.length; i += P1_CONCURRENCY) {
       const batch = topSymbols.slice(i, i + P1_CONCURRENCY)
@@ -128,7 +129,10 @@ function periodicRefresh(
       await Promise.all(promises)
     }
     console.log('[Preload] Periodic refresh complete')
-  }, PERIODIC_REFRESH_INTERVAL)
+    setTimeout(doRefresh, PERIODIC_REFRESH_INTERVAL)
+  }
+
+  setTimeout(doRefresh, PERIODIC_REFRESH_INTERVAL)
 }
 
 export async function startPreload(

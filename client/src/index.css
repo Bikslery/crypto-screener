@@ -67,3 +67,18 @@ html, body, #root {
 .font-mono { font-family: 'JetBrains Mono', ui-monospace, Consolas, 'Courier New', monospace; }
 
 a[href*="tradingview.com"] { display: none !important; }
+
+@keyframes chart-loading-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+@keyframes chart-loading-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.chart-loading-overlay {
+  animation: chart-loading-fade-in 220ms ease-out;
+}
+.chart-loading-text {
+  animation: chart-loading-pulse 1.4s ease-in-out infinite;
+}

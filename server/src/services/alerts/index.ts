@@ -41,7 +41,9 @@ export function startAlertEngine() {
           }
         }
       }
-    } catch {}
+    } catch (e) {
+      console.error('[AlertEngine] Error checking alerts:', e instanceof Error ? e.message : e)
+    }
   }, 5000)
 }
 

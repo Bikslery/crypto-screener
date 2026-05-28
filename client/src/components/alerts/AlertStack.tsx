@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { useAlertStore, useAuthStore } from '../../store'
+import { useAlertStore, useAuthStore, useCoinListStore } from '../../store'
 import api from '../../services/api'
 import { formatPrice, extractBaseAsset } from '../../utils/format'
 import { Bell, TrendingUp, List, BellOff, X, Plus } from 'lucide-react'
@@ -103,7 +103,7 @@ function CreateAlertForm({ onClose }: { onClose: () => void }) {
 
 export function AlertStack() {
   const { alerts, dismissAlert, muteAlert } = useAlertStore()
-  const coins = useCoinListStore(s => s.coins)
+  const coinMap = useCoinListStore(s => s.coinMap)
   const [showForm, setShowForm] = useState(false)
 
   const grouped = useMemo(() => alerts.reduce((acc: any, alert: any) => {
@@ -139,7 +139,6 @@ export function AlertStack() {
 
         {alerts.map((alert: any) => {
           const style = ALERT_STYLES[alert.type] || ALERT_STYLES.price
-          const Icon = style.icon
           const count = grouped[alert.type]?.length || 1
 
           return (
@@ -159,7 +158,7 @@ export function AlertStack() {
                 </div>
                 <div className="text-[11px] text-[#888]">
                   {alert.type === 'price' && (
-                    <span>Цена: <span className="text-[#e5e5e5]">${formatPrice(alert.price, coins.find(c => c.symbol === alert.symbol)?.pricePrecision ?? 2)}</span></span>
+                    <span>Цена: <span className="text-[#e5e5e5]">${formatPrice(alert.price, coinMap.get(alert.symbol)?.pricePrecision ?? 2)}</span></span>
                   )}
                   {alert.type === 'impulse' && (
                     <span className={style.text}>{alert.condition?.percent}% движение</span>

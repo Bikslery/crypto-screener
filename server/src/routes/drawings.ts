@@ -17,9 +17,9 @@ router.get('/', async (req, res) => {
 
 router.post('/', async (req, res) => {
   const { userId } = (req as any).user
-  const { symbol, type, data } = req.body
+  const { symbol, type, data, timeframe } = req.body
   const drawing = await prisma.drawing.create({
-    data: { userId, symbol, timeframe: '', type, data: JSON.stringify(data) },
+    data: { userId, symbol, timeframe: timeframe || '', type, data: JSON.stringify(data) },
   })
   res.json({ ...drawing, data: JSON.parse(drawing.data) })
 })

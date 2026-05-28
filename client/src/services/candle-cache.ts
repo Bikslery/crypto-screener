@@ -1,6 +1,6 @@
 import type { UnifiedCandle } from '../types'
 
-const MAX_CANDLES_PER_KEY = 80000
+const MAX_CANDLES_PER_KEY = 500000
 
 const cache = new Map<string, UnifiedCandle[]>()
 
@@ -20,7 +20,7 @@ export function setCandles(symbol: string, tf: string, candles: UnifiedCandle[])
 export function prependCandles(symbol: string, tf: string, older: UnifiedCandle[]): void {
   const k = key(symbol, tf)
   const existing = cache.get(k) || []
-  const merged = [...older, ...existing]
+  const merged = older.concat(existing)
   cache.set(k, merged.length > MAX_CANDLES_PER_KEY ? merged.slice(-MAX_CANDLES_PER_KEY) : merged)
 }
 

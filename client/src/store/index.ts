@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { useSyncExternalStore } from 'react'
-import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, FilterExchange } from '../types.js'
+import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, FilterExchange, Alert as AlertType } from '../types.js'
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 
 const EXCHANGE_PRIORITY: Record<Exchange, number> = {
@@ -85,7 +85,6 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
 
 const livePrices = new Map<string, number>()
 const livePriceListeners = new Map<string, Set<() => void>>()
-let globalLivePriceTick = 0
 
 function subscribeLivePrice(symbol: string, listener: () => void): () => void {
   let set = livePriceListeners.get(symbol)
@@ -103,7 +102,6 @@ function setLivePrice(symbol: string, price: number) {
   const prev = livePrices.get(symbol)
   if (prev === price) return
   livePrices.set(symbol, price)
-  globalLivePriceTick++
   const set = livePriceListeners.get(symbol)
   if (set) for (const l of set) l()
 }
@@ -176,7 +174,9 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
         if (!dirty) return
 
         const newSorted = s.sortedCoins.map((c) => updateMap.get(c.symbol) || c)
-        set({ coins: newCoins, sortedCoins: newSorted, coinMap: buildCoinMap(newSorted) })
+        const newCoinMap = new Map(s.coinMap)
+        for (const [sym, u] of updateMap) newCoinMap.set(sym, u)
+        set({ coins: newCoins, sortedCoins: newSorted, coinMap: newCoinMap })
       }
     })
 
@@ -257,7 +257,7 @@ export const useChartStore = create<ChartStore>((set) => ({
 }))
 
 interface AlertStore {
-  alerts: any[]
+  alerts: AlertType[]
   init: () => () => void
   dismissAlert: (id: string) => void
   muteAlert: (id: string) => void
@@ -268,17 +268,17 @@ export const useAlertStore = create<AlertStore>((set) => ({
 
   init: () => {
     const unsub = wsOnType('alert', (msg) => {
-      set((s) => ({ alerts: [msg.data, ...s.alerts] }))
+      set((s) => ({ alerts: [msg.data as AlertType, ...s.alerts] }))
     })
     return unsub
   },
 
   dismissAlert: (id) => set((s) => ({
-    alerts: s.alerts.filter((a: any) => a.id !== id),
+    alerts: s.alerts.filter(a => a.id !== id),
   })),
 
   muteAlert: (id) => set((s) => ({
-    alerts: s.alerts.map((a: any) => a.id === id ? { ...a, muted: true } : a),
+    alerts: s.alerts.map(a => a.id === id ? { ...a, muted: true } : a),
   })),
 }))
 

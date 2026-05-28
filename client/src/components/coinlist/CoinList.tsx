@@ -1,4 +1,5 @@
-import { memo, useMemo } from 'react'
+import { memo, useCallback } from 'react'
+import { Virtuoso } from 'react-virtuoso'
 import { useCoinListStore } from '../../store'
 import type { UnifiedTicker } from '../../types'
 import { formatCompact, extractBaseAsset } from '../../utils/format'
@@ -31,7 +32,7 @@ function ArrowFlag() {
 function formatVal(key: ColKey, coin: UnifiedTicker): string {
   const v = coin[key]
   if (key === 'symbol') return extractBaseAsset(v as string)
-  if (key === 'change24h') return `${v >= 0 ? '+' : ''}${(v as number).toFixed(1)}`
+  if (key === 'change24h') return `${(v as number) >= 0 ? '+' : ''}${(v as number).toFixed(1)}`
   if (key === 'range1m' || key === 'natr5m') return v ? `${(v as number).toFixed(1)}` : '-'
   if (key === 'quoteVolume24h') {
     const n = v as number
@@ -46,9 +47,6 @@ interface RowProps {
   onClick: (symbol: string) => void
 }
 
-// Memoized so unchanged rows skip rendering when the surrounding list updates.
-// The default referential equality on `coin` works because the store reuses
-// the same UnifiedTicker object across snapshots whenever fields are unchanged.
 const Row = memo(function Row({ coin, isSelected, onClick }: RowProps) {
   const isUp = coin.change24h >= 0
   return (
@@ -86,13 +84,18 @@ export function CoinList() {
   const selectedSymbol = useCoinListStore(s => s.selectedSymbol)
   const setSort = useCoinListStore(s => s.setSort)
   const expandChart = useCoinListStore(s => s.expandChart)
-  const filterExchange = useCoinListStore(s => s.filterExchange)
 
-  const filtered = useMemo(() =>
-    filterExchange === 'all'
-      ? sortedCoins
-      : sortedCoins.filter(c => c.exchange.includes(filterExchange))
-  , [sortedCoins, filterExchange])
+  const rowRenderer = useCallback((index: number) => {
+    const coin = sortedCoins[index]
+    return (
+      <Row
+        key={coin.symbol}
+        coin={coin}
+        isSelected={selectedSymbol === coin.symbol}
+        onClick={expandChart}
+      />
+    )
+  }, [sortedCoins, selectedSymbol, expandChart])
 
   return (
     <div className="w-[400px] h-full flex flex-col bg-[#0a0a0a]">
@@ -119,15 +122,12 @@ export function CoinList() {
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {filtered.map(coin => (
-          <Row
-            key={coin.symbol}
-            coin={coin}
-            isSelected={selectedSymbol === coin.symbol}
-            onClick={expandChart}
-          />
-        ))}
+      <div className="flex-1 min-h-0">
+        <Virtuoso
+          totalCount={sortedCoins.length}
+          itemContent={rowRenderer}
+          style={{ height: '100%' }}
+        />
       </div>
     </div>
   )

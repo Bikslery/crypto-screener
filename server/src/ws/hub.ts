@@ -77,7 +77,7 @@ function buildInitialCandlesData(): Record<string, any[]> {
     for (const tf of PRELOAD_TFS) {
       const cached = getCachedCandles(symbol, tf)
       if (cached && cached.length > 0) {
-        result[`${symbol}:${tf}`] = cached.slice(-300)
+        result[`${symbol}:${tf}`] = cached.slice(-1000)
       }
     }
   }
@@ -111,16 +111,19 @@ export function setupWsHub(wss: WebSocketServer) {
       try {
         const msg = JSON.parse(raw.toString()) as WsMessage
         if (msg.type === 'subscribe' && msg.channel) {
+          const isNew = !client.subscriptions.has(msg.channel)
           client.subscriptions.add(msg.channel)
 
-          const candleInfo = parseCandleChannel(msg.channel)
-          if (candleInfo && candleManager) {
-            candleManager.subscribeCandle(candleInfo.symbol, candleInfo.tf)
-          }
+          if (isNew) {
+            const candleInfo = parseCandleChannel(msg.channel)
+            if (candleInfo && candleManager) {
+              candleManager.subscribeCandle(candleInfo.symbol, candleInfo.tf)
+            }
 
-          const depthSymbol = parseDepthChannel(msg.channel)
-          if (depthSymbol && candleManager) {
-            candleManager.subscribeDepth(depthSymbol)
+            const depthSymbol = parseDepthChannel(msg.channel)
+            if (depthSymbol && candleManager) {
+              candleManager.subscribeDepth(depthSymbol)
+            }
           }
         } else if (msg.type === 'unsubscribe' && msg.channel) {
           client.subscriptions.delete(msg.channel)

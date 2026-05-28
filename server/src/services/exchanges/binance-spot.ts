@@ -3,6 +3,17 @@ import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } f
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 
+async function fetchWithTimeout(url: string, ms = 10000): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), ms)
+  try {
+    const res = await fetch(url, { signal: ctrl.signal })
+    return res
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 const TF_MAP: Record<string, string> = {
   '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
@@ -21,6 +32,8 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   private depthCbs: DepthCallback[] = []
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private reconnectCandleTimer: ReturnType<typeof setTimeout> | null = null
+  private intentionalCandleClose = false
+  private intentionalDepthClose = false
   private precisionMap = new Map<string, number>()
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
@@ -36,7 +49,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
 
   private async fetchExchangeInfo() {
     try {
-      const res = await fetch('https://api.binance.com/api/v3/exchangeInfo')
+      const res = await fetchWithTimeout('https://api.binance.com/api/v3/exchangeInfo')
       const data = await res.json()
       for (const s of data.symbols || []) {
         if (!s.symbol.endsWith('USDT')) continue
@@ -55,14 +68,16 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
 
   private async pollTickers() {
     try {
-      const res = await fetch('https://api.binance.com/api/v3/ticker/24hr')
+      const res = await fetchWithTimeout('https://api.binance.com/api/v3/ticker/24hr')
       const arr = await res.json()
       for (const t of arr) {
         if (!t.symbol.endsWith('USDT')) continue
         const ticker = this.parseTicker(t)
         for (const cb of this.tickerCbs) cb(ticker)
       }
-    } catch {}
+    } catch (e) {
+      console.error(`[${this.name}] Ticker poll error:`, e instanceof Error ? e.message : e)
+    }
   }
 
   private parseTicker(t: any): UnifiedTicker {
@@ -129,17 +144,20 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   private doReconnectCandles() {
     if (this.candleSubs.size === 0) {
       if (this.candleWs) {
+        this.intentionalCandleClose = true
         try { this.candleWs.close() } catch {}
         this.candleWs = null
       }
       return
     }
     if (this.candleWs && this.candleWs.readyState !== WebSocket.CONNECTING) {
+      this.intentionalCandleClose = true
       try { this.candleWs.close() } catch {}
     }
     const streams = Array.from(this.candleSubs.keys()).join('/')
     const url = `wss://stream.binance.com:9443/stream?streams=${streams}`
     console.log(`[Binance] Candle WS connecting: ${url}`)
+    this.intentionalCandleClose = false
     this.candleWs = new WebSocket(url)
 
     this.candleWs.on('open', () => {
@@ -166,7 +184,11 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     })
 
     this.candleWs.on('close', () => {
-      console.log(`[Binance] Candle WS closed, reconnecting in 3s...`)
+      if (this.intentionalCandleClose) {
+        this.intentionalCandleClose = false
+        return
+      }
+      console.log(`[Binance] Candle WS closed unexpectedly, reconnecting in 3s...`)
       setTimeout(() => this.doReconnectCandles(), 3000)
     })
   }
@@ -174,17 +196,23 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   private reconnectDepth() {
     if (this.depthSubs.size === 0) {
       if (this.depthWs) {
+        this.intentionalDepthClose = true
         try { this.depthWs.close() } catch {}
         this.depthWs = null
       }
       return
     }
     if (this.depthWs && this.depthWs.readyState !== WebSocket.CONNECTING) {
+      this.intentionalDepthClose = true
       try { this.depthWs.close() } catch {}
     }
+    this.intentionalDepthClose = false
     const streams = Array.from(this.depthSubs.keys()).join('/')
     const url = `wss://stream.binance.com:9443/stream?streams=${streams}`
     this.depthWs = new WebSocket(url)
+    this.depthWs.on('open', () => {
+      console.log(`[Binance] Depth WS connected (${this.depthSubs.size} streams)`)
+    })
     this.depthWs.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString())
@@ -193,6 +221,17 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
           for (const cb of this.depthCbs) cb(depth)
         }
       } catch {}
+    })
+    this.depthWs.on('error', (err) => {
+      console.error(`[Binance] Depth WS error:`, err.message || err)
+    })
+    this.depthWs.on('close', () => {
+      if (this.intentionalDepthClose) {
+        this.intentionalDepthClose = false
+        return
+      }
+      console.log(`[Binance] Depth WS closed unexpectedly, reconnecting in 3s...`)
+      setTimeout(() => this.reconnectDepth(), 3000)
     })
   }
 
@@ -230,7 +269,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     if (startTime !== undefined) params.set('startTime', String(startTime))
     if (endTime !== undefined) params.set('endTime', String(endTime))
     const url = `https://api.binance.com/api/v3/klines?${params.toString()}`
-    const res = await fetch(url)
+    const res = await fetchWithTimeout(url)
     const data = await res.json()
     return data.map((k: any[]) => ({
       symbol,
@@ -247,7 +286,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
     const url = `https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=${limit}`
-    const res = await fetch(url)
+    const res = await fetchWithTimeout(url)
     const data = await res.json()
     return {
       symbol,

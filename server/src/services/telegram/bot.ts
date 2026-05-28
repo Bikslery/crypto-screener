@@ -1,6 +1,6 @@
 import { prisma } from '../../db/index.js'
 
-const BOT_TOKEN = '8765523396:AAHbp8DIJFlFpT3wX-zg1e7OmjG3HrSDg_Y'
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`
 
 export const TELEGRAM_BOT_USERNAME = 'ScalpBoardBot' // Update if different
@@ -78,6 +78,10 @@ let offset = 0
 let pollingActive = false
 
 export function startTelegramPolling() {
+  if (!BOT_TOKEN) {
+    console.log('[Telegram] No TELEGRAM_BOT_TOKEN set, polling disabled')
+    return
+  }
   if (pollingActive) return
   pollingActive = true
   console.log('[Telegram] Starting polling...')
@@ -85,7 +89,10 @@ export function startTelegramPolling() {
   async function poll() {
     if (!pollingActive) return
     try {
-      const res = await fetch(`${API_BASE}/getUpdates?offset=${offset}&limit=10`, { timeout: 30000 } as any)
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 30000)
+      const res = await fetch(`${API_BASE}/getUpdates?offset=${offset}&limit=10`, { signal: ctrl.signal })
+      clearTimeout(timer)
       const data = await res.json() as any
       if (data.ok && Array.isArray(data.result)) {
         for (const update of data.result) {
@@ -93,7 +100,7 @@ export function startTelegramPolling() {
           await handleUpdate(update)
         }
       }
-    } catch (err) {
+    } catch {
       // Network errors are expected during polling
     }
     setTimeout(poll, 1000)

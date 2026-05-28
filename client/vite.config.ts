@@ -16,9 +16,9 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor-charts': ['lightweight-charts'],
-          'vendor-react': ['react', 'react-dom'],
+        manualChunks(id) {
+          if (id.includes('lightweight-charts')) return 'vendor-charts'
+          if (id.includes('react-dom') || id.includes('/react/')) return 'vendor-react'
         },
       },
     },

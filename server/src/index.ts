@@ -1,10 +1,10 @@
 import express from 'express'
 import cors from 'cors'
-import { WebSocketServer } from 'ws'
+import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
 import { setupWsHub, setCandleManager } from './ws/hub.js'
 import { startAggregator, adapters } from './services/aggregator/index.js'
-import { startAlertEngine } from './services/alerts/index.js'
+import { startAlertEngine, stopAlertEngine } from './services/alerts/index.js'
 import { startTelegramPolling } from './services/telegram/bot.js'
 import { createCandleManager } from './services/candles/manager.js'
 import { startPreload } from './services/candles/preload.js'
@@ -48,6 +48,21 @@ async function main() {
     console.log(`Server running on http://localhost:${PORT}`)
     console.log(`WebSocket on ws://localhost:${PORT}/ws`)
   })
+
+  const shutdown = async (signal: string) => {
+    console.log(`\n[${signal}] Graceful shutdown...`)
+    wss.clients.forEach(c => {
+      if (c.readyState === WebSocket.OPEN) c.close(1001, 'server shutting down')
+    })
+    for (const adapter of adapters) adapter.disconnect()
+    stopAlertEngine()
+    server.close()
+    await prisma.$disconnect()
+    process.exit(0)
+  }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT', () => shutdown('SIGINT'))
 }
 
 main().catch(console.error)

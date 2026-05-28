@@ -31,6 +31,7 @@ function connect() {
   ws = new WebSocket(url)
 
   ws.onopen = () => {
+    dispatch({ type: 'open' })
     for (const ch of subscriptions) {
       ws?.send(JSON.stringify({ type: 'subscribe', channel: ch }))
     }
@@ -44,7 +45,7 @@ function connect() {
   }
 
   ws.onclose = () => scheduleReconnect()
-  ws.onerror = () => scheduleReconnect()
+  ws.onerror = () => ws?.close()
 }
 
 function scheduleReconnect() {
